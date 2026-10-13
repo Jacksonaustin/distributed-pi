@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>pi-b Monitor</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+    .banner { padding: 1.5rem; border-radius: 8px; color: white; font-size: 1.6rem; text-align: center; }
+    .AVAILABLE { background: #2e7d32; }
+    .UNAVAILABLE { background: #c62828; }
+    .UNKNOWN, .OFFLINE { background: #616161; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <h1>pi-b (monitor)</h1>
+  <div id="banner" class="banner UNKNOWN">Loading…</div>
+
+  <table>
+    <tr><td>Last heartbeat seq</td><td id="seq">–</td></tr>
+    <tr><td>Seconds since last heartbeat</td><td id="since">–</td></tr>
+    <tr><td>Heartbeats received</td><td id="received">–</td></tr>
+    <tr><td>Missed heartbeats</td><td id="missed">–</td></tr>
+    <tr><td>Last delay (s)</td><td id="delay">–</td></tr>
+  </table>
+
+  <h2>Event log</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Event</th><th>Details</th></tr></thead>
+    <tbody id="events"></tbody>
+  </table>
+
+  <script>
+    async function refresh() {
+      const banner = document.getElementById("banner");
+      try {
+        const res = await fetch("/status");
+        const s = await res.json();
+
+        banner.className = "banner " + s.pi_a_status;
+        banner.textContent = "pi-a is " + s.pi_a_status;
+
+        document.getElementById("seq").textContent = s.last_seq ?? "–";
+        document.getElementById("since").textContent = s.seconds_since_last_heartbeat ?? "–";
+        document.getElementById("received").textContent = s.heartbeats_received;
+        document.getElementById("missed").textContent = s.missed_seqs;
+        document.getElementById("delay").textContent = s.last_delay_seconds ?? "–";
+
+        document.getElementById("events").innerHTML = s.recent_events
+          .slice().reverse()
+          .map(e => `<tr><td>${e.time}</td><td>${e.event}</td><td>${e.details}</td></tr>`)
+          .join("");
+      } catch (err) {
+        banner.className = "banner OFFLINE";
+        banner.textContent = "pi-b app is not responding";
+      }
+    }
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>
+
