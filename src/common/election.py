@@ -1,12 +1,15 @@
-"""Leader election logic shared by pi-a, pi-b and the witness.
+import os
+import random
+import threading
+import time
 
-One Node object per process. Flask routes call the handle_* methods;
-background threads call tick() and the leader heartbeat loop.
-
-Thread safety: one lock around all fields. NEVER hold it during a network
-call - snapshot what you need, release, send, re-acquire, then re-check that
-term/state haven't changed before acting on the reply.
-"""
+from common.config import (
+    ELECTION_TIMEOUT_MAX, ELECTION_TIMEOUT_MIN, HEARTBEAT_INTERVAL, MAJORITY,
+    QUORUM_TIMEOUT, QUORUM_WARNING, REQUEST_TIMEOUT, STATE_DIR, TICK_INTERVAL,
+    VOTERS, peers_of,
+)
+from common.rpc import post_json
+from common.storage import load_state, save_state
 
 FOLLOWER = "FOLLOWER"
 CANDIDATE = "CANDIDATE"
@@ -15,135 +18,277 @@ LEADER = "LEADER"
 
 class Node:
     def __init__(self, name, can_lead, event_log, on_change=None):
-        """Set up the node.
+        self.name = name
+        self.can_lead = can_lead
+        self.event_log = event_log
+        self.on_change = on_change
+        self.peers = peers_of(name)
+        self.lock = threading.Lock()
+        self.state_file = os.path.join(STATE_DIR, name + ".json")
 
-        TODO fields:
-          name, can_lead (False for witness), peers (config.peers_of(name))
-          lock
-          current_term, voted_for  <- loaded from storage (state/<name>.json)
-          state = FOLLOWER, leader = None
-          election_deadline (randomized, see _reset_election_timer)
-          votes_received = set()
-          last_ack = {}            # peer -> time.monotonic() of last successful heartbeat ack
-          quorum_lost_warned = False
-          event_log, on_change     # on_change(event, node_status) drives LED/buzzer
-        """
-        raise NotImplementedError
+        saved = load_state(self.state_file)
+        self.current_term = saved["current_term"]
+        self.voted_for = saved["voted_for"]
+
+        self.state = FOLLOWER
+        self.leader = None
+        self.last_heartbeat = None
+        self.votes_received = set()
+        self.last_ack = {}
+        self.quorum_lost = False
+        self._reset_election_timer()
+
+        self._log("STARTUP", f"loaded term {self.current_term}, voted_for {self.voted_for}")
+
+    # ---------------------------------------------------------------- helpers
+
+    def _log(self, event, details):
+        self.event_log.log(event, self.current_term, details)
+
+    def _save(self):
+        """(lock held)"""
+        save_state(self.state_file, self.current_term, self.voted_for)
+
+    def _notify(self, event):
+        """(lock held) on_change must return immediately - no sleeping in it."""
+        if self.on_change:
+            self.on_change(event, self._status_unlocked())
+
+    def _reset_election_timer(self):
+        """(lock held)"""
+        self.election_deadline = time.monotonic() + random.uniform(
+            ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)
+
+    def _become_follower(self, reason):
+        """(lock held)"""
+        was = self.state
+        self.state = FOLLOWER
+        self.votes_received = set()
+        self.quorum_lost = False
+        self._reset_election_timer()
+        if was != FOLLOWER:
+            self._log("STEPPED_DOWN", f"{was} -> FOLLOWER: {reason}")
+            self._notify("follower")
+
+    def _observe_newer_term(self, term, source):
+        """Rule 0 (lock held): a newer term always wins."""
+        self._log("TERM_UPDATED", f"{self.current_term} -> {term} (from {source})")
+        self.current_term = term
+        self.voted_for = None
+        self.leader = None
+        self._save()
+        self._become_follower(f"newer term {term} from {source}")
 
     # ---------------------------------------------------------------- startup
 
     def start(self):
-        """TODO: start the tick thread, and (if can_lead) the leader heartbeat thread. Both daemon."""
-        raise NotImplementedError
+        threading.Thread(target=self._tick_loop, daemon=True).start()
+        if self.can_lead:
+            threading.Thread(target=self._leader_loop, daemon=True).start()
 
     # --------------------------------------------------------- incoming RPCs
 
     def handle_heartbeat(self, msg):
-        """POST /heartbeat  msg = {term, leader}  ->  {term, success}
+        term = msg.get("term")
+        leader = msg.get("leader")
+        if not isinstance(term, int) or not leader:
+            with self.lock:
+                return {"term": self.current_term, "success": False}
 
-        TODO:
-          - validate fields (bad -> success False)
-          - term < mine  -> log REJECTED_OLD_TERM, return {term: mine, success: False}
-          - term > mine  -> _observe_newer_term(...)
-          - same term & I'm CANDIDATE -> become FOLLOWER (someone else won)
-          - record leader (log LEADER_CHANGED if different), reset election timer
-          - return {term: mine, success: True}
-        """
-        raise NotImplementedError
+        with self.lock:
+            if term < self.current_term:
+                self._log("REJECTED_OLD_TERM",
+                          f"heartbeat from {leader} term {term} < {self.current_term}")
+                return {"term": self.current_term, "success": False}
+
+            if term > self.current_term:
+                self._observe_newer_term(term, leader)
+
+            if self.state == LEADER:
+                self._log("SPLIT_BRAIN", f"{leader} also claims leadership of term {term}")
+                return {"term": self.current_term, "success": False}
+
+            if self.state == CANDIDATE:
+                self._become_follower(f"{leader} won term {term}")
+
+            if self.leader != leader:
+                self._log("LEADER_CHANGED", f"leader is now {leader}")
+                self.leader = leader
+
+            self.last_heartbeat = time.monotonic()
+            self._reset_election_timer()
+            return {"term": self.current_term, "success": True}
 
     def handle_request_vote(self, msg):
-        """POST /request-vote  msg = {term, candidate}  ->  {term, vote_granted}
+        term = msg.get("term")
+        candidate = msg.get("candidate")
+        if not isinstance(term, int) or not candidate:
+            with self.lock:
+                return {"term": self.current_term, "vote_granted": False}
 
-        TODO:
-          - validate fields
-          - term < mine  -> log REJECTED_OLD_TERM, deny
-          - term > mine  -> _observe_newer_term(...)
-          - grant if voted_for is None or voted_for == candidate
-              (same candidate asking twice gets "yes" again - that's the duplicate test)
-          - on grant: voted_for = candidate, SAVE, reset election timer, log VOTE_GRANTED
-          - on deny: log VOTE_DENIED with the reason
-        """
-        raise NotImplementedError
+        with self.lock:
+            if term < self.current_term:
+                self._log("REJECTED_OLD_TERM",
+                          f"vote request from {candidate} term {term} < {self.current_term}")
+                return {"term": self.current_term, "vote_granted": False}
 
-    # ------------------------------------------------------------ term rules
+            if term > self.current_term:
+                self._observe_newer_term(term, candidate)
 
-    def _observe_newer_term(self, term, reason):
-        """Rule 0 - call with the lock held, for requests AND responses.
+            if self.voted_for is None:
+                self.voted_for = candidate
+                self._save()                      # persist BEFORE replying
+                self._log("VOTE_GRANTED", f"to {candidate}")
+                self._reset_election_timer()
+                return {"term": self.current_term, "vote_granted": True}
 
-        TODO: current_term = term, voted_for = None, SAVE, become FOLLOWER (if not already),
-              log STEPPED_DOWN / TERM_UPDATED with the reason.
-        """
-        raise NotImplementedError
+            if self.voted_for == candidate:
+                self._log("VOTE_REPEATED", f"{candidate} asked again, same answer")
+                self._reset_election_timer()
+                return {"term": self.current_term, "vote_granted": True}
+
+            self._log("VOTE_DENIED", f"{candidate}: already voted for {self.voted_for}")
+            return {"term": self.current_term, "vote_granted": False}
 
     # ---------------------------------------------------------------- timers
 
-    def _reset_election_timer(self):
-        """TODO: election_deadline = now + random.uniform(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX)"""
-        raise NotImplementedError
-
     def _tick_loop(self):
-        """TODO: forever: self.tick(); sleep(TICK_INTERVAL)"""
-        raise NotImplementedError
+        while True:
+            self.tick()
+            time.sleep(TICK_INTERVAL)
 
     def tick(self):
-        """Check the clock and change state if a timer expired.
+        should_elect = False
+        with self.lock:
+            now = time.monotonic()
+            if self.state in (FOLLOWER, CANDIDATE):
+                if self.can_lead and now > self.election_deadline:
+                    should_elect = True
+            elif self.state == LEADER:
+                silent = now - max(self.last_ack.values(), default=0)
+                if silent > QUORUM_TIMEOUT:
+                    self._log("QUORUM_TIMEOUT", f"no ack for {silent:.1f}s")
+                    self.leader = None
+                    self._become_follower("lost quorum")
+                elif silent > QUORUM_WARNING and not self.quorum_lost:
+                    self.quorum_lost = True
+                    self._log("QUORUM_LOST", f"no ack for {silent:.1f}s")
+                    self._notify("lost_quorum")
 
-        TODO:
-          - FOLLOWER/CANDIDATE, can_lead, past election_deadline -> _start_election()
-          - LEADER: seconds since newest ack
-              > QUORUM_WARNING (first time) -> log QUORUM_LOST, on_change("lost_quorum")
-              > QUORUM_TIMEOUT              -> step down to FOLLOWER, log STEPPED_DOWN
-        Remember: don't call _start_election while holding the lock if it does network calls.
-        """
-        raise NotImplementedError
+        if should_elect:                 # outside the lock: it does network calls
+            self._start_election()
 
     # -------------------------------------------------------------- election
 
     def _start_election(self):
-        """Become candidate and ask for votes.
+        with self.lock:
+            self.current_term += 1
+            self.state = CANDIDATE
+            self.voted_for = self.name
+            self.leader = None
+            self._save()
+            self.votes_received = {self.name}
+            self._reset_election_timer()
+            my_term = self.current_term
+            self._log("ELECTION_STARTED", "voted for self")
+            self._notify("candidate")
 
-        TODO:
-          1. (lock) term += 1, state = CANDIDATE, voted_for = me, SAVE,
-             votes_received = {me}, reset timer, log ELECTION_STARTED, on_change("candidate")
-             snapshot the term you're campaigning in
-          2. (no lock) post_json each peer's /request-vote with {term, candidate}
-             - parallel threads are nicer, sequential with 0.5s timeouts also works
-          3. (lock) for each reply:
-               - reply None -> skip
-               - reply term > mine -> _observe_newer_term, stop
-               - still CANDIDATE in the same term and vote_granted -> votes_received.add(peer)
-          4. len(votes_received) >= MAJORITY -> _become_leader()
-        """
-        raise NotImplementedError
+        payload = {"term": my_term, "candidate": self.name}
+        for peer, url in self.peers.items():
+            reply = post_json(url + "/request-vote", payload, REQUEST_TIMEOUT)
+
+            with self.lock:
+                if reply is None:
+                    self._log("VOTE_NO_REPLY", peer)
+                    continue
+                if reply.get("term", 0) > self.current_term:
+                    self._observe_newer_term(reply["term"], peer)
+                    return
+                if self.state != CANDIDATE or self.current_term != my_term:
+                    return
+                if reply.get("vote_granted"):
+                    self.votes_received.add(peer)
+                    self._log("VOTE_RECEIVED",
+                              f"from {peer} ({len(self.votes_received)} of {len(VOTERS)})")
+                    if len(self.votes_received) >= MAJORITY:
+                        self._become_leader()
+                        return
+                else:
+                    self._log("VOTE_REFUSED", peer)
 
     def _become_leader(self):
-        """TODO (lock held): state = LEADER, leader = me, last_ack = {now for each peer}
-        so you start with quorum, log BECAME_LEADER (term + vote count), on_change("leader")."""
-        raise NotImplementedError
+        """(lock held)"""
+        self.state = LEADER
+        self.leader = self.name
+        now = time.monotonic()
+        self.last_ack = {peer: now for peer in self.peers}
+        self.quorum_lost = False
+        self._log("BECAME_LEADER",
+                  f"{len(self.votes_received)} votes: {sorted(self.votes_received)}")
+        self._notify("leader")
 
     # ---------------------------------------------------------------- leader
 
     def _leader_loop(self):
-        """Every HEARTBEAT_INTERVAL while LEADER, send heartbeats.
+        while True:
+            start = time.monotonic()
+            with self.lock:
+                is_leader = self.state == LEADER
+                my_term = self.current_term
 
-        TODO:
-          - (lock) if not LEADER -> just sleep and continue; else snapshot term
-          - (no lock) post_json each peer's /heartbeat with {term, leader: me}
-          - (lock) for each reply:
-               - None -> no ack
-               - reply term > mine -> _observe_newer_term (step down)
-               - success -> last_ack[peer] = now; if we had lost quorum, log QUORUM_RESTORED
-          - sleep the remainder of the interval (same trick as Lab 4)
-        """
-        raise NotImplementedError
+            if is_leader:
+                payload = {"term": my_term, "leader": self.name}
+                for peer, url in self.peers.items():
+                    reply = post_json(url + "/heartbeat", payload, REQUEST_TIMEOUT)
+
+                    with self.lock:
+                        if reply is None:
+                            continue
+                        if reply.get("term", 0) > self.current_term:
+                            self._observe_newer_term(reply["term"], peer)
+                            break
+                        if self.state != LEADER or self.current_term != my_term:
+                            break
+                        if reply.get("success"):
+                            self.last_ack[peer] = time.monotonic()
+                            if self.quorum_lost:
+                                self.quorum_lost = False
+                                self._log("QUORUM_RESTORED", f"ack from {peer}")
+                                self._notify("quorum_restored")
+
+            time.sleep(max(0, HEARTBEAT_INTERVAL - (time.monotonic() - start)))
+
+    def _has_quorum_unlocked(self):
+        """(lock held)"""
+        if self.state != LEADER:
+            return False
+        return time.monotonic() - max(self.last_ack.values(), default=0) <= QUORUM_WARNING
 
     def has_quorum(self):
-        """TODO: LEADER and any peer acked within QUORUM_WARNING (self + 1 ack = 2 of 3)."""
-        raise NotImplementedError
+        with self.lock:
+            return self._has_quorum_unlocked()
 
     # ---------------------------------------------------------------- status
 
+    def _status_unlocked(self):
+        """(lock held)"""
+        now = time.monotonic()
+        return {
+            "node": self.name,
+            "can_lead": self.can_lead,
+            "state": self.state,
+            "term": self.current_term,
+            "voted_for": self.voted_for,
+            "leader": self.leader,
+            "has_quorum": self._has_quorum_unlocked(),
+            "majority": MAJORITY,
+            "votes_received": sorted(self.votes_received),
+            "seconds_since_heartbeat": (round(now - self.last_heartbeat, 1)
+                                        if self.last_heartbeat is not None else None),
+            "ack_ages": {p: round(now - t, 1) for p, t in self.last_ack.items()},
+            "recent_events": self.event_log.recent(),
+        }
+
     def status(self):
-        """TODO: {node, state, term, voted_for, leader, has_quorum, can_lead,
-                  seconds_since_heartbeat / last_ack, recent_events}"""
-        raise NotImplementedError
+        with self.lock:
+            return self._status_unlocked()
