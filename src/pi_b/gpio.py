@@ -8,7 +8,6 @@ def warning_pattern():
     print("BUZZER: BEEP-BEEP-BEEP (pi-a unavailable)")
     buzzer.play(69)
     time.sleep(.1)
-    buzzer.stop()
     time.sleep(0.1)
     buzzer.play(69)
     time.sleep(.1)
