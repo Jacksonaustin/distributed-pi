@@ -2,11 +2,12 @@ import os
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from common.config import (
-    ELECTION_TIMEOUT_MAX, ELECTION_TIMEOUT_MIN, HEARTBEAT_INTERVAL, MAJORITY,
-    QUORUM_TIMEOUT, QUORUM_WARNING, REQUEST_TIMEOUT, STATE_DIR, TICK_INTERVAL,
-    VOTERS, peers_of,
+    ACKS_NEEDED, CAN_LEAD, CLUSTER_FILE, ELECTION_TIMEOUT_MAX, ELECTION_TIMEOUT_MIN,
+    HEARTBEAT_INTERVAL, MAJORITY, QUORUM_TIMEOUT, QUORUM_WARNING, REQUEST_TIMEOUT,
+    STATE_DIR, TICK_INTERVAL, VOTERS, peers_of,
 )
 from common.rpc import post_json
 from common.storage import load_state, save_state
@@ -17,13 +18,18 @@ LEADER = "LEADER"
 
 
 class Node:
-    def __init__(self, name, can_lead, event_log, on_change=None):
+    def __init__(self, name, event_log, on_change=None, can_lead=None):
+        if name not in VOTERS:
+            raise SystemExit(f"'{name}' is not a voter in {CLUSTER_FILE} "
+                             f"(voters: {', '.join(VOTERS)})")
         self.name = name
-        self.can_lead = can_lead
+        self.can_lead = CAN_LEAD[name] if can_lead is None else can_lead
         self.event_log = event_log
         self.on_change = on_change
         self.peers = peers_of(name)
         self.lock = threading.Lock()
+        # one worker per peer so every request in a round goes out at once
+        self.pool = ThreadPoolExecutor(max_workers=max(1, 2 * len(self.peers)))
         self.state_file = os.path.join(STATE_DIR, name + ".json")
 
         saved = load_state(self.state_file)
@@ -69,6 +75,18 @@ class Node:
         if was != FOLLOWER:
             self._log("STEPPED_DOWN", f"{was} -> FOLLOWER: {reason}")
             self._notify("follower")
+
+    def _broadcast(self, path, payload):
+        """POST payload to every peer in parallel. Yields (peer, reply) as replies
+        arrive; reply is None when the peer didn't answer. Call WITHOUT the lock."""
+        futures = {self.pool.submit(post_json, url + path, payload, REQUEST_TIMEOUT): peer
+                   for peer, url in self.peers.items()}
+        for future in as_completed(futures):
+            yield futures[future], future.result()
+
+    def _acks_within(self, window, now):
+        """(lock held) how many peers acked a heartbeat in the last `window` seconds."""
+        return sum(1 for t in self.last_ack.values() if now - t <= window)
 
     def _observe_newer_term(self, term, source):
         """Rule 0 (lock held): a newer term always wins."""
@@ -165,14 +183,16 @@ class Node:
                 if self.can_lead and now > self.election_deadline:
                     should_elect = True
             elif self.state == LEADER:
-                silent = now - max(self.last_ack.values(), default=0)
-                if silent > QUORUM_TIMEOUT:
-                    self._log("QUORUM_TIMEOUT", f"no ack for {silent:.1f}s")
+                if self._acks_within(QUORUM_TIMEOUT, now) < ACKS_NEEDED:
+                    self._log("QUORUM_TIMEOUT",
+                              f"fewer than {ACKS_NEEDED} ack(s) for {QUORUM_TIMEOUT:.0f}s")
                     self.leader = None
                     self._become_follower("lost quorum")
-                elif silent > QUORUM_WARNING and not self.quorum_lost:
+                elif (self._acks_within(QUORUM_WARNING, now) < ACKS_NEEDED
+                      and not self.quorum_lost):
                     self.quorum_lost = True
-                    self._log("QUORUM_LOST", f"no ack for {silent:.1f}s")
+                    self._log("QUORUM_LOST",
+                              f"fewer than {ACKS_NEEDED} ack(s) in {QUORUM_WARNING:.0f}s")
                     self._notify("lost_quorum")
 
         if should_elect:                 # outside the lock: it does network calls
@@ -194,9 +214,7 @@ class Node:
             self._notify("candidate")
 
         payload = {"term": my_term, "candidate": self.name}
-        for peer, url in self.peers.items():
-            reply = post_json(url + "/request-vote", payload, REQUEST_TIMEOUT)
-
+        for peer, reply in self._broadcast("/request-vote", payload):
             with self.lock:
                 if reply is None:
                     self._log("VOTE_NO_REPLY", peer)
@@ -238,9 +256,7 @@ class Node:
 
             if is_leader:
                 payload = {"term": my_term, "leader": self.name}
-                for peer, url in self.peers.items():
-                    reply = post_json(url + "/heartbeat", payload, REQUEST_TIMEOUT)
-
+                for peer, reply in self._broadcast("/heartbeat", payload):
                     with self.lock:
                         if reply is None:
                             continue
@@ -250,8 +266,10 @@ class Node:
                         if self.state != LEADER or self.current_term != my_term:
                             break
                         if reply.get("success"):
-                            self.last_ack[peer] = time.monotonic()
-                            if self.quorum_lost:
+                            now = time.monotonic()
+                            self.last_ack[peer] = now
+                            if (self.quorum_lost
+                                    and self._acks_within(QUORUM_WARNING, now) >= ACKS_NEEDED):
                                 self.quorum_lost = False
                                 self._log("QUORUM_RESTORED", f"ack from {peer}")
                                 self._notify("quorum_restored")
@@ -262,7 +280,7 @@ class Node:
         """(lock held)"""
         if self.state != LEADER:
             return False
-        return time.monotonic() - max(self.last_ack.values(), default=0) <= QUORUM_WARNING
+        return self._acks_within(QUORUM_WARNING, time.monotonic()) >= ACKS_NEEDED
 
     def has_quorum(self):
         with self.lock:
@@ -275,13 +293,16 @@ class Node:
         now = time.monotonic()
         return {
             "node": self.name,
+            "role": "candidate" if self.can_lead else "witness",
             "can_lead": self.can_lead,
             "state": self.state,
             "term": self.current_term,
             "voted_for": self.voted_for,
             "leader": self.leader,
             "has_quorum": self._has_quorum_unlocked(),
+            "voters": len(VOTERS),
             "majority": MAJORITY,
+            "acks_needed": ACKS_NEEDED,
             "votes_received": sorted(self.votes_received),
             "seconds_since_heartbeat": (round(now - self.last_heartbeat, 1)
                                         if self.last_heartbeat is not None else None),

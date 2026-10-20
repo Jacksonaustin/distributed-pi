@@ -1,0 +1,7 @@
+{
+  "voters": [
+    {"name": "pi-a",    "url": "http://localhost:5001", "can_lead": true},
+    {"name": "pi-b",    "url": "http://localhost:5002", "can_lead": true},
+    {"name": "witness", "url": "http://localhost:5003", "can_lead": false}
+  ]
+}

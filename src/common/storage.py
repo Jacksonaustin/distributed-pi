@@ -6,7 +6,7 @@ import os
 def load_state(path):
 
   if not os.path.exists(path):
-    return{"current term ": 0, "voted_for":None}
+    return{"current_term": 0, "voted_for":None}
 
   with open(path) as f: 
     return json.load(f)

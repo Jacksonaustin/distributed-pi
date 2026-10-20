@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Election Monitor</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1f1f1d; --muted: #6b6a65; --border: #dddcd5;
+    --leader: #1d7a5a; --leader-bg: #e1f5ee; --cand: #8a5a0b; --cand-bg: #faeeda;
+    --follow: #4b4a46; --follow-bg: #efeee8; --down: #a32d2d; --down-bg: #fcebeb;
+    --accent: #185fa5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1b1a; --card: #252523; --text: #ecebe6; --muted: #a3a29b; --border: #3a3936;
+      --leader: #7fdcb9; --leader-bg: #10392c; --cand: #f6c46e; --cand-bg: #3d2b0b;
+      --follow: #cfcdc4; --follow-bg: #31302d; --down: #f19a9a; --down-bg: #4a1818;
+      --accent: #85b7eb;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0; }
+  h2 { font-size: 16px; font-weight: 600; margin: 28px 0 10px; }
+  .muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  #conn { margin-left: auto; font-size: 13px; }
+  .banner { padding: 12px 14px; border-radius: 8px; margin-bottom: 14px; font-weight: 600; display: none; }
+  .banner.bad { display: block; background: var(--down-bg); color: var(--down); border: 1px solid var(--down); }
+  .banner.warn { display: block; background: var(--cand-bg); color: var(--cand); border: 1px solid var(--cand); }
+  .banner.ok { display: block; background: var(--leader-bg); color: var(--leader); border: 1px solid var(--leader); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .card.me { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .card-head a { color: var(--text); font-weight: 600; font-size: 16px; text-decoration: none; }
+  .card-head a:hover { text-decoration: underline; }
+  .state { font-size: 18px; font-weight: 700; padding: 6px 10px; border-radius: 8px; margin-bottom: 10px; }
+  .LEADER { background: var(--leader-bg); color: var(--leader); }
+  .CANDIDATE { background: var(--cand-bg); color: var(--cand); }
+  .FOLLOWER { background: var(--follow-bg); color: var(--follow); }
+  .UNREACHABLE { background: var(--down-bg); color: var(--down); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; font-size: 13px; }
+  dt { color: var(--muted); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+  .hw { margin-top: 10px; font-size: 13px; padding-top: 8px; border-top: 1px dashed var(--border); }
+  .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--card); }
+  td.ev { font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: nowrap; }
+  .scroll { max-height: 420px; overflow-y: auto; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  select, input, button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
+                          background: var(--card); color: var(--text); }
+  input[type=number] { width: 90px; }
+  button { cursor: pointer; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button:hover { background: var(--follow-bg); }
+  .err { color: var(--down); font-size: 13px; min-height: 1em; margin-top: 6px; }
+  pre { margin: 10px 0 0; padding: 10px; background: var(--follow-bg); border-radius: 8px; font-size: 12px;
+        white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tabs button { border-color: var(--border); color: var(--muted); font-weight: 500; padding: 3px 10px; }
+  .tabs button.on { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Election monitor</h1>
+    <span class="muted">viewing from <strong id="me">{{ name }}</strong></span>
+    <span class="muted" id="summary"></span>
+    <span id="conn" class="pill"></span>
+  </header>
+
+  <div id="banner" class="banner"></div>
+  <div class="grid" id="cards"></div>
+
+  <h2>Event log</h2>
+  <div class="row tabs" style="margin-bottom:8px">
+    <button id="tab-all" class="on" onclick="setLogScope('all')">All voters</button>
+    <button id="tab-me" onclick="setLogScope('me')">This node only</button>
+  </div>
+  <div class="table-wrap scroll">
+    <table>
+      <thead><tr><th>Time</th><th>Voter</th><th>Term</th><th>Event</th><th>Details</th></tr></thead>
+      <tbody id="events"></tbody>
+    </table>
+  </div>
+
+  <h2>Test messages</h2>
+  <p class="muted" style="margin:0 0 10px;font-size:13px">
+    Send a hand-made message to any voter. Use an old term to test rejection, or "Send twice" for the duplicate vote request test.
+  </p>
+  <div class="card">
+    <div class="row">
+      <label>Target<select id="t-target"></select></label>
+      <label>Message
+        <select id="t-kind" onchange="syncSender()">
+          <option value="request-vote">Vote request</option>
+          <option value="heartbeat">Heartbeat</option>
+        </select>
+      </label>
+      <label>Term<input id="t-term" type="number" min="0" step="1" oninput="clearErr()"></label>
+      <label><span id="t-sender-label">Candidate</span><select id="t-sender"></select></label>
+      <button onclick="sendTest(1)">Send</button>
+      <button onclick="sendTest(2)">Send twice</button>
+      <button onclick="fillTerm(-1)" title="Target's current term minus one">Old term</button>
+    </div>
+    <div class="err" id="t-err"></div>
+    <pre id="t-out" style="display:none"></pre>
+  </div>
+</main>
+
+<script>
+  const ME = document.getElementById("me").textContent;
+  let latest = null, logScope = "all", selectsBuilt = false;
+
+  function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  function hardware(v) {
+    if (v.node === "pi-a") {
+      if (v.state === "LEADER") return v.has_quorum ? "LED solid" : "LED fast blink (lost quorum)";
+      if (v.state === "CANDIDATE") return "LED slow blink";
+      if (v.state === "FOLLOWER") return "LED off";
+    }
+    if (v.node === "pi-b") {
+      if (v.state === "LEADER") return v.has_quorum ? "Chirp every 5 s" : "Three beeps (lost quorum)";
+      if (v.state === "CANDIDATE") return "One beep";
+      if (v.state === "FOLLOWER") return "Silent";
+    }
+    return null;
+  }
+
+  function card(v, url) {
+    const up = v.state !== "UNREACHABLE";
+    const role = up ? (v.can_lead ? "candidate" : "witness") : "";
+    const hw = up ? hardware(v) : null;
+    const rows = up ? [
+      ["Term", v.term],
+      ["Voted for", v.voted_for ?? "none"],
+      ["Leader", v.leader ?? "unknown"],
+      v.state === "LEADER" ? ["Quorum", v.has_quorum ? "yes" : "no"] : null,
+      v.state === "LEADER" ? ["Ack ages", Object.entries(v.ack_ages || {}).map(([p, a]) => p + " " + a + "s").join(", ")] : null,
+      v.state === "CANDIDATE" ? ["Votes", (v.votes_received || []).length + " of " + v.majority + " needed"] : null,
+      v.state !== "LEADER" ? ["Last heartbeat", v.seconds_since_heartbeat == null ? "never" : v.seconds_since_heartbeat + "s ago"] : null,
+    ].filter(Boolean) : [["Address", url]];
+    return `<div class="card${v.node === ME ? " me" : ""}">
+      <div class="card-head">
+        <a href="${esc(url)}/" title="Open this voter's own dashboard">${esc(v.node)}</a>
+        ${role ? `<span class="pill ${role === "candidate" ? "CANDIDATE" : "FOLLOWER"}">${role}</span>` : ""}
+      </div>
+      <div class="state ${esc(v.state)}">${esc(v.state)}</div>
+      <dl>${rows.map(([k, val]) => `<dt>${esc(k)}</dt><dd>${esc(val)}</dd>`).join("")}</dl>
+      ${hw ? `<div class="hw">${esc(hw)}</div>` : ""}
+    </div>`;
+  }
+
+  function banner(voters, majority) {
+    const b = document.getElementById("banner");
+    const up = voters.filter(v => v.state !== "UNREACHABLE");
+    const leaders = up.filter(v => v.state === "LEADER");
+    if (leaders.length > 1) {
+      b.className = "banner bad";
+      b.textContent = "Two or more voters think they are leader: " +
+        leaders.map(l => `${l.node} (term ${l.term})`).join(", ") + ". Investigate.";
+    } else if (leaders.length === 1) {
+      const l = leaders[0];
+      b.className = l.has_quorum ? "banner ok" : "banner warn";
+      b.textContent = l.has_quorum
+        ? `${l.node} is leader for term ${l.term} with quorum.`
+        : `${l.node} is leader for term ${l.term} but has lost quorum.`;
+    } else {
+      b.className = "banner warn";
+      b.textContent = up.length < majority
+        ? `Only ${up.length} voter(s) reachable; ${majority} needed to elect a leader.`
+        : "No leader right now. An election should finish within a few seconds.";
+    }
+  }
+
+  function renderEvents(voters) {
+    const rows = [];
+    for (const v of voters) {
+      if (logScope === "me" && v.node !== ME) continue;
+      for (const e of (v.recent_events || [])) rows.push({...e, node: v.node});
+    }
+    rows.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
+    document.getElementById("events").innerHTML = rows.slice(0, 150).map(e =>
+      `<tr><td class="ev">${esc(e.time.replace("T", " "))}</td><td>${esc(e.node)}</td><td>${esc(e.term)}</td>
+       <td class="ev">${esc(e.event)}</td><td>${esc(e.details)}</td></tr>`).join("")
+      || `<tr><td colspan="5" class="muted">No events yet.</td></tr>`;
+  }
+
+  function buildSelects(d) {
+    const names = Object.keys(d.urls);
+    const opts = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+    document.getElementById("t-target").innerHTML = opts;
+    document.getElementById("t-sender").innerHTML = opts;
+    const other = names.find(n => n !== ME) || names[0];
+    document.getElementById("t-target").value = other;
+    document.getElementById("t-sender").value = ME;
+    selectsBuilt = true;
+    fillTerm(0);
+  }
+
+  function setLogScope(s) {
+    logScope = s;
+    document.getElementById("tab-all").classList.toggle("on", s === "all");
+    document.getElementById("tab-me").classList.toggle("on", s === "me");
+    if (latest) renderEvents(latest.voters);
+  }
+
+  function syncSender() {
+    const hb = document.getElementById("t-kind").value === "heartbeat";
+    document.getElementById("t-sender-label").textContent = hb ? "Leader" : "Candidate";
+  }
+
+  function fillTerm(offset) {
+    if (!latest) return;
+    const target = document.getElementById("t-target").value;
+    const v = latest.voters.find(x => x.node === target);
+    if (v && typeof v.term === "number") document.getElementById("t-term").value = Math.max(0, v.term + offset);
+    clearErr();
+  }
+
+  function clearErr() { document.getElementById("t-err").textContent = ""; }
+
+  async function sendTest(times) {
+    const termText = document.getElementById("t-term").value.trim();
+    if (!/^\d+$/.test(termText)) {
+      document.getElementById("t-err").textContent = "Enter a whole-number term first.";
+      return;
+    }
+    const kind = document.getElementById("t-kind").value;
+    const sender = document.getElementById("t-sender").value;
+    const payload = kind === "heartbeat"
+      ? {term: Number(termText), leader: sender}
+      : {term: Number(termText), candidate: sender};
+    const body = JSON.stringify({target: document.getElementById("t-target").value, kind, payload});
+    const results = [];
+    for (let i = 0; i < times; i++) {
+      try {
+        const r = await fetch("/test/send", {method: "POST", headers: {"Content-Type": "application/json"}, body});
+        results.push(await r.json());
+      } catch (e) {
+        results.push({error: "this node is not responding"});
+      }
+    }
+    const out = document.getElementById("t-out");
+    out.style.display = "block";
+    out.textContent = results.map((r, i) => `#${i + 1} ` + JSON.stringify(r, null, 2)).join("\n\n");
+    refresh();
+  }
+
+  async function refresh() {
+    const conn = document.getElementById("conn");
+    try {
+      const d = await (await fetch("/cluster")).json();
+      latest = d;
+      if (!selectsBuilt) buildSelects(d);
+      document.getElementById("summary").textContent =
+        `${d.voters.length} voters, majority ${d.majority}`;
+      document.getElementById("cards").innerHTML = d.voters.map(v => card(v, d.urls[v.node])).join("");
+      banner(d.voters, d.majority);
+      renderEvents(d.voters);
+      conn.className = "pill LEADER";
+      conn.textContent = "live";
+    } catch (e) {
+      conn.className = "pill UNREACHABLE";
+      conn.textContent = ME + " is not responding";
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>

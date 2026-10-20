@@ -96,19 +96,9 @@ LED solid **and** buzzer chirping at the same time means both Pis think they're 
 8. [ ] Run all three on the laptop (mock GPIO) and get an election working
 9. [ ] Real indicators, deploy to the Pis, run the tests below
 
-## Laptop run commands (from `src/`)
+## Running it
 
-```bash
-PI_A_URL=http://localhost:5001 PI_B_URL=http://localhost:5002 WITNESS_URL=http://localhost:5003 ../venv/bin/python -m witness.app
-```
-
-```bash
-GPIOZERO_PIN_FACTORY=mock PI_A_URL=http://localhost:5001 PI_B_URL=http://localhost:5002 WITNESS_URL=http://localhost:5003 ../venv/bin/python -m pi_a.lab5_app
-```
-
-```bash
-GPIOZERO_PIN_FACTORY=mock PI_A_URL=http://localhost:5001 PI_B_URL=http://localhost:5002 WITNESS_URL=http://localhost:5003 ../venv/bin/python -m pi_b.lab5_app
-```
+See [lab5_running.md](lab5_running.md) for laptop and Pi commands, cluster files, adding voters, and the dashboard.
 
 ## Test plan
 

@@ -2,39 +2,19 @@
 
 Run from src/:  python -m pi_b.lab5_app
 """
-import os
 import threading
 
-from flask import Flask, request
+from common.hw import ensure_pin_factory
 
-from common.election import Node
-from common.event_log import EventLog
-from pi_b import indicators
+ensure_pin_factory()          # must run before pi_b.gpio creates the buzzer
 
-NODE_NAME = "pi-b"
-PORT = int(os.environ.get("PORT", 5002))
-
-app = Flask(__name__)
-event_log = EventLog("pi_b_events.log")
-node = Node(NODE_NAME, can_lead=True, event_log=event_log, on_change=indicators.on_change)
+from common.webapp import run_node   # noqa: E402
+from pi_b import indicators          # noqa: E402
 
 
-@app.route("/heartbeat", methods=["POST"])
-def heartbeat():
-    return node.handle_heartbeat(request.get_json(silent=True) or {})
-
-
-@app.route("/request-vote", methods=["POST"])
-def request_vote():
-    return node.handle_request_vote(request.get_json(silent=True) or {})
-
-
-@app.route("/status")
-def status():
-    return node.status()
+def start_buzzer(node):
+    threading.Thread(target=indicators.buzzer_loop, args=(node.status,), daemon=True).start()
 
 
 if __name__ == "__main__":
-    threading.Thread(target=indicators.buzzer_loop, args=(node.status,), daemon=True).start()
-    node.start()
-    app.run(host="0.0.0.0", port=PORT, use_reloader=False)
+    run_node("pi-b", on_change=indicators.on_change, setup=start_buzzer)

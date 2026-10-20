@@ -5,36 +5,37 @@
   LEADER + quorum -> solid
   lost quorum     -> fast blink
 
-Reuse the LED object from gpio.py (`from pi_a.gpio import heart`) - creating a
-second LED(26) fails because the pin is already in use.
-
-Tip: gpiozero's led.blink(on_time, off_time) runs in the background by itself,
-so these can be one-liners and you don't need your own blink thread.
+led.blink() runs in the background by itself, so on_change returns immediately.
 """
+from pi_a.gpio import heart
 
 
 def show_follower():
-    """TODO: LED off."""
-    raise NotImplementedError
+    print("LED: off (follower)")
+    heart.off()
 
 
 def show_candidate():
-    """TODO: slow blink (e.g. 0.5s on / 0.5s off)."""
-    raise NotImplementedError
+    print("LED: slow blink (candidate)")
+    heart.blink(on_time=0.5, off_time=0.5)
 
 
 def show_leader():
-    """TODO: solid on."""
-    raise NotImplementedError
+    print("LED: solid (leader with quorum)")
+    heart.on()
 
 
 def show_lost_quorum():
-    """TODO: fast blink (e.g. 0.1s on / 0.1s off)."""
-    raise NotImplementedError
+    print("LED: fast blink (lost quorum)")
+    heart.blink(on_time=0.1, off_time=0.1)
 
 
 def on_change(event, status):
-    """Node calls this on every state change. TODO: map event -> one of the functions above.
-    events: "follower", "candidate", "leader", "lost_quorum", "quorum_restored"
-    """
-    raise NotImplementedError
+    if event == "follower":
+        show_follower()
+    elif event == "candidate":
+        show_candidate()
+    elif event in ("leader", "quorum_restored"):
+        show_leader()
+    elif event == "lost_quorum":
+        show_lost_quorum()

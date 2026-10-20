@@ -1,0 +1,7 @@
+{
+  "voters": [
+    {"name": "pi-a",    "url": "http://pi-a.local:5001",                   "can_lead": true},
+    {"name": "pi-b",    "url": "http://pi-b.local:5002",                   "can_lead": true},
+    {"name": "witness", "url": "http://Jacksons-MacBook-Air-2.local:5003", "can_lead": false}
+  ]
+}
