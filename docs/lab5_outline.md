@@ -67,10 +67,21 @@ Majority = 3 // 2 + 1 = **2**.
 ## Timing (see `config.py`)
 
 - Heartbeat interval: 1s
-- Election timeout: random between 3 and 6s, new value on every reset (prevents repeated split votes)
+- Election timeout: random between 6 and 9s, new value on every reset (prevents repeated split votes)
 - Quorum warning: 2s with no ack (*our choice; state it in the report*)
 - Quorum loss → step down: 5s (required by the lab)
 - HTTP request timeout: 0.5s
+- Leader lease: after a valid heartbeat (or at startup), a voter refuses vote requests for a **new** term for 6s, logged as `REJECTED_LEADER_ALIVE`.
+
+### Why the election timeout is 6–9s and not shorter (the safety requirement)
+
+The handout requires that *"only one Raspberry Pi may be the authorized leader at a time."* A cut-off leader keeps acting as leader for up to 5s, until its quorum check fails. If the other Pi could be elected sooner than that, both would be leader at once. So:
+
+1. A new leader needs a vote from a voter that hasn't heard the old leader for at least 6s (the lease).
+2. That means the old leader hasn't received an ack from that voter for at least 6 − 0.5 = 5.5s, longer than its 5s quorum timeout.
+3. So the old leader has always stepped down **before** the new one can be elected.
+
+`config.py` checks this with `assert ELECTION_TIMEOUT_MIN > QUORUM_TIMEOUT + REQUEST_TIMEOUT + TICK_INTERVAL`. A simulated test with partial cuts, an isolated leader and reconnection found no moment with two leaders.
 
 ## Hardware mapping
 
@@ -106,16 +117,16 @@ Record for each test: predicted result, observed result, elected leader, term, v
 
 | # | Test | Prediction | Observed | Leader | Term | Votes | Time to elect |
 |---|---|---|---|---|---|---|---|
-| 1 | Start all three voters | One Pi wins with 2–3 votes | | | | | |
+| 1 | Start all three voters | One Pi wins with 2–3 votes, about 6–9s after startup | | | | | |
 | 2 | Start both Pis together | Possible split vote; random timeouts settle it | | | | | |
 | 3 | Stop the follower | Leader keeps quorum through the witness; no election | | | | | |
-| 4 | Stop the leader | Follower wins (self + witness), term + 1 | | | | | |
+| 4 | Stop the leader | Follower wins (self + witness), term + 1, about 6–9s after the stop | | | | | |
 | 5 | Restart the former leader | Loads its term, stays FOLLOWER | | | | | |
 | 6 | Stop the witness | Leader keeps quorum through the other Pi | | | | | |
-| 7 | Isolate one Pi | Isolated leader steps down after 5s; its term keeps rising | | | | | |
-| 8 | Restore the isolated Pi | Its higher term forces a new election | | | | | |
-| 9 | Duplicate vote request | Same answer both times; counted once | | | | | |
-| 10 | Old-term heartbeat | Rejected and logged; reply has the current term | | | | | |
+| 7 | Isolate one Pi | Isolated **leader**: fast blink / 3 beeps at 2s, steps down at 5s, then the other Pi wins (no overlap). Isolated **follower**: its vote requests get `REJECTED_LEADER_ALIVE`; the leader stays leader. The isolated Pi's term keeps rising | | | | | |
+| 8 | Restore the isolated Pi | Its higher term reaches the leader in a heartbeat reply, so the leader steps down and a new election runs | | | | | |
+| 9 | Duplicate vote request | Same answer both times; counted once (`VOTE_REPEATED` or `VOTE_DENIED`) | | | | | |
+| 10 | Old-term heartbeat | Rejected and logged (`REJECTED_OLD_TERM`); reply has the current term | | | | | |
 | 11 | Restart a voter after voting | Reloads `voted_for`; refuses another candidate this term | | | | | |
 
 Manual messages for tests 9 and 10:
@@ -130,12 +141,25 @@ curl -X POST http://localhost:5002/heartbeat -H "Content-Type: application/json"
 
 ## Report checklist
 
-- [ ] Diagram: three voters, heartbeat and vote arrows, and the state machine
-- [ ] Hardware photo
-- [ ] Test table and event-log excerpts
-- [ ] Why two leaders can't exist in the same term (one vote per term; majorities overlap)
-- [ ] Why two leaders *can* briefly coexist in different terms (isolated old leader until its 5s step-down)
-- [ ] Why the witness is needed (2 voters can't form a majority after one fails)
+Required by the handout (page 3):
+
+- [ ] All Flask application and witness source code
+- [ ] LaTeX-generated PDF listing your name, lab information, date and class
+- [ ] **State-transition diagram** (FOLLOWER → CANDIDATE → LEADER, and every way back to FOLLOWER)
+- [ ] **Diagram of the two Pis and the witness** (heartbeats, vote requests, acks)
+- [ ] Detailed image of the final hardware setup
+- [ ] Table of predicted and observed results for each test
+- [ ] Event-log entries showing elections and recovery
+- [ ] **Comparison of Lab 4's heartbeat system and Lab 5's election system**
+- [ ] **Discussion of what happens when a majority is unavailable**
+
+Points worth making:
+
+- [ ] Lab 4 vs Lab 5: Lab 4 only *detected* that pi-a failed (fixed roles, alarm); Lab 5 *recovers* by electing a new leader, and uses terms so stale messages are rejected
+- [ ] No majority: no candidate can get 2 votes, so there's no leader. A leader without acks steps down after 5s. Candidates keep retrying with rising terms. It's safe (never two leaders), but nothing is in charge until a majority is back
+- [ ] Why two leaders can't share a term (one vote per term; any two majorities overlap)
+- [ ] Why two leaders can't overlap at all here (the leader lease and the 6s minimum election timeout)
+- [ ] Why the witness is needed (with 2 voters, losing either one leaves no majority)
 - [ ] Randomized timeouts and split votes
-- [ ] Disruptive rejoin after isolation (term inflation; Raft's pre-vote fixes this)
-- [ ] The quorum-warning threshold you chose
+- [ ] Disruptive rejoin after isolation (term inflation; Raft's pre-vote would prevent it)
+- [ ] The 2s quorum-warning threshold you chose

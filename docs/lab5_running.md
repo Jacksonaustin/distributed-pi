@@ -134,4 +134,5 @@ cd ~/distributed-pi/src && rm -rf state logs
 - **Test messages:** send a hand-made vote request or heartbeat to any voter.
   - "Old term" fills in the target's term minus one, for the old-term heartbeat test.
   - "Send twice" sends the same vote request twice, for the duplicate vote test.
-  - A *higher* term forces an election, because every voter adopts the new term. That's correct behavior and worth noting in the report.
+  - A vote request for a *higher* term is rejected with `REJECTED_LEADER_ALIVE` while the target has heard from a leader in the last 6s. This leader lease is what keeps two leaders from overlapping. Once no leader has been heard from for 6s, a higher term is adopted as normal.
+  - Messages naming the witness (or an unknown voter) as the leader or candidate are rejected with `REJECTED_INVALID`, because the witness can't lead.

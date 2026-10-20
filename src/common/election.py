@@ -16,6 +16,11 @@ FOLLOWER = "FOLLOWER"
 CANDIDATE = "CANDIDATE"
 LEADER = "LEADER"
 
+# After a valid heartbeat (or at startup) a voter refuses to help elect a new
+# leader for this long - the current leader may still be acting as leader.
+# This is what guarantees only one authorized leader at a time (see config.py).
+LEADER_LEASE = ELECTION_TIMEOUT_MIN
+
 
 class Node:
     def __init__(self, name, event_log, on_change=None, can_lead=None):
@@ -42,6 +47,8 @@ class Node:
         self.votes_received = set()
         self.last_ack = {}
         self.quorum_lost = False
+        # a restarted voter can't know whether a leader is alive, so it assumes one is
+        self.lease_until = time.monotonic() + LEADER_LEASE
         self._reset_election_timer()
 
         self._log("STARTUP", f"loaded term {self.current_term}, voted_for {self.voted_for}")
@@ -106,12 +113,23 @@ class Node:
 
     # --------------------------------------------------------- incoming RPCs
 
+    def _invalid(self, kind, msg, reason, reply_key):
+        """Reject a malformed message (or one from a voter that may not send it)."""
+        with self.lock:
+            self._log("REJECTED_INVALID", f"{kind} {msg}: {reason}")
+            return {"term": self.current_term, reply_key: False}
+
+    def _leader_alive(self, now):
+        """(lock held) True while this voter believes a leader may still be acting."""
+        return self.state == LEADER or now < self.lease_until
+
     def handle_heartbeat(self, msg):
         term = msg.get("term")
         leader = msg.get("leader")
-        if not isinstance(term, int) or not leader:
-            with self.lock:
-                return {"term": self.current_term, "success": False}
+        if not isinstance(term, int) or isinstance(term, bool) or term < 0:
+            return self._invalid("heartbeat", msg, "term must be a whole number", "success")
+        if leader not in VOTERS or not CAN_LEAD[leader] or leader == self.name:
+            return self._invalid("heartbeat", msg, f"{leader!r} cannot be leader", "success")
 
         with self.lock:
             if term < self.current_term:
@@ -133,21 +151,36 @@ class Node:
                 self._log("LEADER_CHANGED", f"leader is now {leader}")
                 self.leader = leader
 
-            self.last_heartbeat = time.monotonic()
+            now = time.monotonic()
+            self.last_heartbeat = now
+            self.lease_until = now + LEADER_LEASE
             self._reset_election_timer()
             return {"term": self.current_term, "success": True}
 
     def handle_request_vote(self, msg):
         term = msg.get("term")
         candidate = msg.get("candidate")
-        if not isinstance(term, int) or not candidate:
-            with self.lock:
-                return {"term": self.current_term, "vote_granted": False}
+        if not isinstance(term, int) or isinstance(term, bool) or term < 0:
+            return self._invalid("vote request", msg, "term must be a whole number", "vote_granted")
+        if candidate not in VOTERS or not CAN_LEAD[candidate] or candidate == self.name:
+            return self._invalid("vote request", msg, f"{candidate!r} cannot be leader",
+                                 "vote_granted")
 
         with self.lock:
             if term < self.current_term:
                 self._log("REJECTED_OLD_TERM",
                           f"vote request from {candidate} term {term} < {self.current_term}")
+                return {"term": self.current_term, "vote_granted": False}
+
+            # Safety: while a leader may still be acting, a request to start a new
+            # term is not a valid message - adopting its term would let a second
+            # leader be elected before the first one has stepped down.
+            now = time.monotonic()
+            if term > self.current_term and candidate != self.leader and self._leader_alive(now):
+                who = self.name if self.state == LEADER else (self.leader or "a leader")
+                self._log("REJECTED_LEADER_ALIVE",
+                          f"vote request from {candidate} term {term}: {who} may still be "
+                          f"leading (lease {max(0.0, self.lease_until - now):.1f}s left)")
                 return {"term": self.current_term, "vote_granted": False}
 
             if term > self.current_term:
@@ -161,11 +194,14 @@ class Node:
                 return {"term": self.current_term, "vote_granted": True}
 
             if self.voted_for == candidate:
-                self._log("VOTE_REPEATED", f"{candidate} asked again, same answer")
+                # same request again: same answer, and it is still only one vote
+                self._log("VOTE_REPEATED", f"{candidate} asked again in term {term}; "
+                                           f"vote already counted, not voting twice")
                 self._reset_election_timer()
                 return {"term": self.current_term, "vote_granted": True}
 
-            self._log("VOTE_DENIED", f"{candidate}: already voted for {self.voted_for}")
+            self._log("VOTE_DENIED", f"{candidate}: already voted for {self.voted_for} "
+                                     f"in term {self.current_term}")
             return {"term": self.current_term, "vote_granted": False}
 
     # ---------------------------------------------------------------- timers
@@ -239,7 +275,8 @@ class Node:
         self.state = LEADER
         self.leader = self.name
         now = time.monotonic()
-        self.last_ack = {peer: now for peer in self.peers}
+        # the voters that just granted votes count as fresh contact; nobody else does
+        self.last_ack = {peer: now for peer in self.votes_received if peer != self.name}
         self.quorum_lost = False
         self._log("BECAME_LEADER",
                   f"{len(self.votes_received)} votes: {sorted(self.votes_received)}")
@@ -291,6 +328,11 @@ class Node:
     def _status_unlocked(self):
         """(lock held)"""
         now = time.monotonic()
+        has_quorum = self._has_quorum_unlocked()
+        if self.state == LEADER:
+            quorum_status = "HAS_QUORUM" if has_quorum else "LOST_QUORUM"
+        else:
+            quorum_status = "NOT_LEADER"
         return {
             "node": self.name,
             "role": "candidate" if self.can_lead else "witness",
@@ -299,7 +341,9 @@ class Node:
             "term": self.current_term,
             "voted_for": self.voted_for,
             "leader": self.leader,
-            "has_quorum": self._has_quorum_unlocked(),
+            "has_quorum": has_quorum,
+            "quorum_status": quorum_status,
+            "leader_lease_seconds": round(max(0.0, self.lease_until - now), 1),
             "voters": len(VOTERS),
             "majority": MAJORITY,
             "acks_needed": ACKS_NEEDED,

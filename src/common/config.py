@@ -32,12 +32,19 @@ ACKS_NEEDED = MAJORITY - 1               # leader's own vote + this many acks = 
 
 # --- Timing (seconds) ---
 HEARTBEAT_INTERVAL = 1.0                 # leader sends heartbeats this often
-ELECTION_TIMEOUT_MIN = 3.0               # follower waits a random time in [min, max]
-ELECTION_TIMEOUT_MAX = 6.0               #   before starting an election
 QUORUM_WARNING = 2.0                     # leader: too few acks this long -> "lost quorum" indicator
 QUORUM_TIMEOUT = 5.0                     # leader: too few acks this long -> step down (lab requirement)
 REQUEST_TIMEOUT = 0.5                    # HTTP timeout for every peer request
 TICK_INTERVAL = 0.1                      # how often the tick loop checks timers
+
+# Safety requirement: only one authorized leader at a time. A new leader needs a
+# vote from a voter that has not heard the old leader for ELECTION_TIMEOUT_MIN
+# (see LEADER_LEASE in election.py). The old leader's newest ack is then at least
+# ELECTION_TIMEOUT_MIN - REQUEST_TIMEOUT old, so it has already stepped down after
+# QUORUM_TIMEOUT. That only holds if MIN > QUORUM_TIMEOUT + REQUEST_TIMEOUT + TICK_INTERVAL.
+ELECTION_TIMEOUT_MIN = 6.0               # follower waits a random time in [min, max]
+ELECTION_TIMEOUT_MAX = 9.0               #   before starting an election
+assert ELECTION_TIMEOUT_MIN > QUORUM_TIMEOUT + REQUEST_TIMEOUT + TICK_INTERVAL
 
 STATE_DIR = _resolve(os.environ.get("STATE_DIR", "state"))   # where <node>.json is persisted
 LOG_DIR = _resolve(os.environ.get("LOG_DIR", "logs"))        # where <node>_events.log goes
