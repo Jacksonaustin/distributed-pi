@@ -333,7 +333,9 @@ class Node:
         # the cluster without a majority.
         status = get_json(url + "/status", timeout=1.5)
         if not status or status.get("node") != name:
-            return 400, {"error": f"can't reach {name} at {url}/status - start it first"}
+            # 503, not 400: it may just still be starting, so the joiner retries
+            return 503, {"error": f"can't reach {name} at {url}/status - is it running, and "
+                                  f"is that address reachable from the leader {self.name}?"}
 
         with self.lock:
             if self.state != LEADER:          # lost leadership while we checked

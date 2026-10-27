@@ -23,6 +23,10 @@ from urllib.parse import urlparse
 
 ROLES = ("candidate", "witness", "follower")
 VOTING_ROLES = ("candidate", "witness")
+# Course rule: a leader always needs at least this many votes, however few voters
+# there are - so one Pi plus one witness can never elect a leader. The cluster
+# file can set "min_votes"; this is the default when it doesn't.
+MIN_VOTES = 3
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 
@@ -51,7 +55,8 @@ def _parse(data):
     for entry in data.get("members", data.get("voters", [])):
         members[entry["name"]] = {"url": entry["url"].rstrip("/"), "role": _role_of(entry)}
     config_id = (int(data.get("config_term", 0)), int(data.get("config_version", 0)))
-    return config_id, members
+    members_min = int(data.get("min_votes", MIN_VOTES))
+    return config_id, members, members_min
 
 
 def write_if_newer(path, snapshot):
@@ -69,12 +74,12 @@ class Membership:
     def __init__(self, path):
         self.path = path
         with open(path) as f:
-            self.config_id, self.members = _parse(json.load(f))
+            self.config_id, self.members, self.min_votes = _parse(json.load(f))
 
     @classmethod
     def empty(cls, path):
         m = cls.__new__(cls)
-        m.path, m.config_id, m.members = path, (-1, -1), {}
+        m.path, m.config_id, m.members, m.min_votes = path, (-1, -1), {}, MIN_VOTES
         return m
 
     # ------------------------------------------------------------- queries
@@ -98,7 +103,9 @@ class Membership:
         return [n for n in self.members if self.role(n) in VOTING_ROLES]
 
     def majority(self):
-        return len(self.voters()) // 2 + 1        # 3 voters -> 2, 5 voters -> 3
+        """Votes needed to become leader: a normal majority (3 voters -> 2,
+        5 -> 3), but never fewer than min_votes."""
+        return max(len(self.voters()) // 2 + 1, self.min_votes)
 
     def acks_needed(self):
         return self.majority() - 1                # leader's own vote + this many acks
@@ -120,6 +127,7 @@ class Membership:
         return {
             "config_term": self.config_id[0],
             "config_version": self.config_id[1],
+            "min_votes": self.min_votes,
             "members": [{"name": n, "url": m["url"], "role": m["role"]}
                         for n, m in self.members.items()],
         }
@@ -128,7 +136,7 @@ class Membership:
 
     def replace(self, snapshot):
         """Adopt a newer list received from the leader. Returns a summary of what changed."""
-        new_id, new_members = _parse(snapshot)
+        new_id, new_members, self.min_votes = _parse(snapshot)
         added = [n for n in new_members if n not in self.members]
         removed = [n for n in self.members if n not in new_members]
         moved = [n for n in new_members
@@ -159,7 +167,7 @@ class Membership:
         the file already holds (several local test nodes can share one file)."""
         try:
             with open(self.path) as f:
-                on_disk, _ = _parse(json.load(f))
+                on_disk = _parse(json.load(f))[0]
             if on_disk > self.config_id:
                 return
         except (OSError, ValueError, KeyError):
@@ -168,6 +176,7 @@ class Membership:
         lines = ["{",
                  f'  "config_term": {snap["config_term"]},',
                  f'  "config_version": {snap["config_version"]},',
+                 f'  "min_votes": {snap["min_votes"]},',
                  '  "members": [']
         entries = [f"    {json.dumps(m)}" for m in snap["members"]]
         lines.append(",\n".join(entries))

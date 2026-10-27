@@ -117,13 +117,27 @@ def create_app(node):
     return app
 
 
-def _my_ip_toward(url):
-    """The address other members can reach this machine on (the interface that
-    routes to the cluster). No packets are sent - a UDP connect just picks a route."""
+def _ip_toward(url):
+    """The local address used to reach `url` (no packets are sent - a UDP
+    connect just picks a route). None if there's no route."""
     target = urlparse(url)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.connect((target.hostname, target.port or 80))
-        return s.getsockname()[0]
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((target.hostname, target.port or 80))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
+def _my_ip(join_url, members):
+    """The address other members can reach this machine on. Joining via
+    localhost would give 127.0.0.1, which means "itself" to every other machine -
+    so prefer the route toward a member that lives on another machine."""
+    for url in [join_url] + [m["url"] for m in members.members.values()]:
+        ip = _ip_toward(url)
+        if ip and not ip.startswith("127."):
+            return ip
+    return _ip_toward(join_url) or "127.0.0.1"   # everything is on this machine
 
 
 def _ask_to_join(node, event_log, join_url, my_url, role):
@@ -152,9 +166,10 @@ def _ask_to_join(node, event_log, join_url, my_url, role):
                           "accepted, but no heartbeat with us in the member list yet; asking again")
             continue
         reason = (reply or {}).get("error", "no answer")
-        event_log.log("JOIN_RETRY", node.status()["term"], f"{join_url}/join: {reason}; retrying in 3s")
         if status_code == 400:                        # our request itself is wrong
+            event_log.log("JOIN_FAILED", node.status()["term"], f"{join_url}/join: {reason}")
             return
+        event_log.log("JOIN_RETRY", node.status()["term"], f"{join_url}/join: {reason}; retrying in 3s")
         time.sleep(3.0)
 
 
@@ -201,7 +216,7 @@ def run_node(default_name, on_change=None, setup=None):
         port = args.port or DEFAULT_JOIN_PORT
         role = args.role or "follower"
     my_url = args.url.rstrip("/") if args.url else (
-        f"http://{_my_ip_toward(join_url)}:{port}" if join_url else members.url(args.name))
+        f"http://{_my_ip(join_url, members)}:{port}" if join_url else members.url(args.name))
     # ask the leader if we're new, or if our address changed
     needs_join = join_url and (not is_member or my_url != members.url(args.name))
 
