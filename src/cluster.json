@@ -2,6 +2,6 @@
   "voters": [
     {"name": "pi-a",    "url": "http://10.95.194.135:5001", "can_lead": true},
     {"name": "pi-b",    "url": "http://10.95.116.3:5002",   "can_lead": true},
-    {"name": "witness", "url": "http://10.95.106.138:5003", "can_lead": false}
+    {"name": "witness", "url": "http://10.95.106.138:5003", "can_lead": true}
   ]
 }

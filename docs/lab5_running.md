@@ -31,11 +31,64 @@ Pick one with `CLUSTER=<file>`. **Every voter must use the same list.**
 
 ### Adding a witness or candidate
 
-1. Add an entry to the cluster file, on **every** machine, with a unique name and port. Use `"can_lead": false` for a witness and `true` for a candidate.
-2. Start it with `python -m witness.app --name <its name>`. That entry point works for any voter without hardware.
-3. Restart the other voters so they read the new list.
+On the `lab6` branch, members can join and leave while the cluster runs. See **Dynamic membership** below. On `main` (Lab 5), add an entry to the cluster file on every machine and restart the voters.
 
 The majority (`voters // 2 + 1`) and the number of acks a leader needs (`majority - 1`) are recalculated automatically. With 5 voters, a leader needs 3 votes and acks from 2 peers. Odd numbers of voters are best, since a 4th voter raises the majority without letting the cluster survive any more failures.
+
+## Dynamic membership (`lab6` branch)
+
+### Roles
+
+| Role | Votes | Can lead | Counts toward the majority |
+|---|---|---|---|
+| `candidate` | yes | yes | yes |
+| `witness` | yes | no | yes |
+| `follower` | no | no | no: receives heartbeats and knows the leader, nothing more |
+
+### Join a running cluster
+
+Start the new device with `--join` pointing at **any** running member. It fetches the current member list, starts its app, then asks to be added. Requests are forwarded to the leader.
+
+```bash
+cd src && ../venv/bin/python -m witness.app --name pi-c --role candidate --port 5004 --join http://10.0.0.11:5001
+```
+
+- **`--role`:** `candidate`, `witness` or `follower` (default `follower`).
+- **`--port`:** the port this device listens on (default 5000).
+- **`--url`:** the address others should use, e.g. `http://10.0.0.13:5004`. If you leave it out, it's detected from the network interface that reaches the `--join` address.
+- **Entry point:** use `pi_a.lab5_app` or `pi_b.lab5_app` instead of `witness.app` if the device has that LED or buzzer.
+
+**Done when** its log shows `JOINED_CLUSTER` and every dashboard lists it. You can also add a device from any dashboard (**Members → Add member**), but it must already be running.
+
+### Leave
+
+Use a member card's **Remove** button, or:
+
+```bash
+curl -X POST http://<any member>/leave -H "Content-Type: application/json" -d '{"name": "pi-c"}'
+```
+
+The removed node logs `REMOVED_FROM_CLUSTER` and stops voting and running for leader. The current **leader** can't be removed; stop it first so another member takes over, then remove it.
+
+### Change a member's address
+
+Restart it with `--join` and its new `--url` (or `--port`). The leader records the new address and every member picks it up (`MEMBER_UPDATED`).
+
+### Rules that keep it safe
+
+1. **Only the leader changes the list.** Each version has an id `(term, counter)`, shown as `v1.3`. It travels in every heartbeat, and members save the newest one into their own cluster file.
+2. **One voter change at a time.** After adding or removing a candidate or witness, the leader refuses the next voter change until a majority of the **new** voters have acknowledged the new list (`MEMBERSHIP_COMMITTED`). The dashboard shows "being confirmed" while it waits. With one change at a time, the old and new majorities always share a voter, so two leaders can't be elected under different lists. Followers can be added or removed at any time.
+3. **A voter must answer `/status` before it's added.** Adding a dead voter would raise the majority with no one to fill it.
+4. **Voters refuse candidates with an older member list**, so a new leader always knows the latest members.
+5. **A joining node waits until it's actually in the list** and asks again if not. An accepted join can be lost if the leader changes before most voters have it.
+
+### Your copy of `cluster.json` changes
+
+Each node **rewrites its own `src/cluster.json`** whenever the list changes, in a new format with `config_term`, `config_version` and a `members` list that uses `role` instead of `can_lead`. The old Lab 5 format is still read.
+
+Because the file is in git, `git pull` on a Pi may complain that it was changed. Keep the Pi's version with `git stash` → `git pull` → `git stash pop`, or throw it away with `git checkout src/cluster.json`.
+
+If you edit the file by hand while the cluster runs, the leader's list wins whenever its id is newer. To force a hand edit, stop every member, make the same edit on all machines, and raise `config_version` by one.
 
 ## On the laptop
 

@@ -60,6 +60,7 @@
   input[type=number] { width: 90px; }
   button { cursor: pointer; border-color: var(--accent); color: var(--accent); font-weight: 600; }
   button:hover { background: var(--follow-bg); }
+  button.small { padding: 2px 8px; font-size: 12px; font-weight: 500; }
   .err { color: var(--down); font-size: 13px; min-height: 1em; margin-top: 6px; }
   pre { margin: 10px 0 0; padding: 10px; background: var(--follow-bg); border-radius: 8px; font-size: 12px;
         white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -113,11 +114,33 @@
     <div class="err" id="t-err"></div>
     <pre id="t-out" style="display:none"></pre>
   </div>
+
+  <h2>Members</h2>
+  <p class="muted" style="margin:0 0 10px;font-size:13px">
+    Add a node that is already running (it must answer at its address), or use a card's Remove button.
+    Requests go to the leader. Only one voter change at a time: wait until the summary at the top stops saying "being confirmed".
+  </p>
+  <div class="card">
+    <div class="row">
+      <label>Name<input id="m-name" placeholder="pi-c" oninput="clearMemberErr()"></label>
+      <label>Address<input id="m-url" placeholder="http://10.0.0.13:5000" style="width:220px" oninput="clearMemberErr()"></label>
+      <label>Role
+        <select id="m-role">
+          <option value="follower">follower (no vote)</option>
+          <option value="witness">witness (votes)</option>
+          <option value="candidate">candidate (votes, can lead)</option>
+        </select>
+      </label>
+      <button onclick="addMember()">Add member</button>
+    </div>
+    <div class="err" id="m-err"></div>
+    <pre id="m-out" style="display:none"></pre>
+  </div>
 </main>
 
 <script>
   const ME = document.getElementById("me").textContent;
-  let latest = null, logScope = "all", selectsBuilt = false;
+  let latest = null, logScope = "all", selectsFor = "";
 
   function esc(s) {
     return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -137,9 +160,10 @@
     return null;
   }
 
-  function card(v, url) {
+  function card(v, url, roles) {
     const up = v.state !== "UNREACHABLE";
-    const role = up ? (v.can_lead ? "candidate" : "witness") : "";
+    const role = (up && v.role) || roles[v.node] || "";
+    const isMember = v.node in roles;
     const hw = up ? hardware(v) : null;
     const rows = up ? [
       ["Term", v.term],
@@ -149,21 +173,30 @@
       v.state === "LEADER" ? ["Ack ages", Object.entries(v.ack_ages || {}).map(([p, a]) => p + " " + a + "s").join(", ")] : null,
       v.state === "CANDIDATE" ? ["Votes", (v.votes_received || []).length + " of " + v.majority + " needed"] : null,
       v.state !== "LEADER" ? ["Last heartbeat", v.seconds_since_heartbeat == null ? "never" : v.seconds_since_heartbeat + "s ago"] : null,
+      ["Member list", "v" + v.member_list_version],
     ].filter(Boolean) : [["Address", url]];
+    const pillClass = role === "candidate" ? "CANDIDATE" : role === "witness" ? "LEADER" : "FOLLOWER";
+    const joining = up && v.active === false ? `<div class="hw">Waiting to join the cluster</div>` : "";
+    const remove = isMember
+      ? `<button class="small" onclick="removeMember('${esc(v.node)}')" title="Ask the leader to remove this member">Remove</button>`
+      : "";
     return `<div class="card${v.node === ME ? " me" : ""}">
       <div class="card-head">
-        <a href="${esc(url)}/" title="Open this voter's own dashboard">${esc(v.node)}</a>
-        ${role ? `<span class="pill ${role === "candidate" ? "CANDIDATE" : "FOLLOWER"}">${role}</span>` : ""}
+        <a href="${esc(url || "")}/" title="Open this member's own dashboard">${esc(v.node)}</a>
+        ${role ? `<span class="pill ${pillClass}">${esc(role)}</span>` : ""}
       </div>
       <div class="state ${esc(v.state)}">${esc(v.state)}</div>
       <dl>${rows.map(([k, val]) => `<dt>${esc(k)}</dt><dd>${esc(val)}</dd>`).join("")}</dl>
       ${hw ? `<div class="hw">${esc(hw)}</div>` : ""}
+      ${joining}
+      <div style="margin-top:10px;text-align:right">${remove}</div>
     </div>`;
   }
 
-  function banner(voters, majority) {
+  function banner(voters, majority, roles) {
     const b = document.getElementById("banner");
     const up = voters.filter(v => v.state !== "UNREACHABLE");
+    const votersUp = up.filter(v => roles[v.node] === "candidate" || roles[v.node] === "witness");
     const leaders = up.filter(v => v.state === "LEADER");
     if (leaders.length > 1) {
       b.className = "banner bad";
@@ -177,8 +210,8 @@
         : `${l.node} is leader for term ${l.term} but has lost quorum.`;
     } else {
       b.className = "banner warn";
-      b.textContent = up.length < majority
-        ? `Only ${up.length} voter(s) reachable; ${majority} needed to elect a leader.`
+      b.textContent = votersUp.length < majority
+        ? `Only ${votersUp.length} voter(s) reachable; ${majority} needed to elect a leader.`
         : "No leader right now. An election should finish within a few seconds.";
     }
   }
@@ -204,7 +237,7 @@
     const other = names.find(n => n !== ME) || names[0];
     document.getElementById("t-target").value = other;
     document.getElementById("t-sender").value = ME;
-    selectsBuilt = true;
+    selectsFor = names.join(",");
     fillTerm(0);
   }
 
@@ -229,6 +262,44 @@
   }
 
   function clearErr() { document.getElementById("t-err").textContent = ""; }
+  function clearMemberErr() { document.getElementById("m-err").textContent = ""; }
+
+  async function membership(kind, body) {
+    const out = document.getElementById("m-out");
+    out.style.display = "block";
+    out.textContent = (kind === "join" ? "Asking the leader to add " : "Asking the leader to remove ") + body.name + "...";
+    try {
+      const r = await fetch("/" + kind, {method: "POST", headers: {"Content-Type": "application/json"},
+                                         body: JSON.stringify(body)});
+      const reply = await r.json();
+      out.textContent = r.ok
+        ? `${kind === "join" ? "Added" : "Removed"} ${body.name}. Majority is now ${reply.majority}.`
+        : `Not done: ${reply.error || r.status}`;
+    } catch (e) {
+      out.textContent = "Not done: this node is not responding.";
+    }
+    refresh();
+  }
+
+  function addMember() {
+    const name = document.getElementById("m-name").value.trim();
+    const url = document.getElementById("m-url").value.trim().replace(/\/$/, "");
+    const err = document.getElementById("m-err");
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
+      err.textContent = "Enter a name of lowercase letters, digits and dashes, e.g. pi-c.";
+      return;
+    }
+    if (!/^http:\/\/[^\/:\s]+:\d+$/.test(url)) {
+      err.textContent = "Enter an address like http://10.0.0.13:5000.";
+      return;
+    }
+    membership("join", {name, url, role: document.getElementById("m-role").value});
+  }
+
+  function removeMember(name) {
+    if (!window.confirm(`Remove ${name} from the cluster? It will stop voting and running for leader.`)) return;
+    membership("leave", {name});
+  }
 
   async function sendTest(times) {
     const termText = document.getElementById("t-term").value.trim();
@@ -262,11 +333,17 @@
     try {
       const d = await (await fetch("/cluster")).json();
       latest = d;
-      if (!selectsBuilt) buildSelects(d);
+      if (selectsFor !== Object.keys(d.urls).join(",")) buildSelects(d);
+      const roleCount = r => Object.values(d.roles).filter(x => x === r).length;
+      const voterCount = roleCount("candidate") + roleCount("witness");
+      const followers = roleCount("follower");
       document.getElementById("summary").textContent =
-        `${d.voters.length} voters, majority ${d.majority}`;
-      document.getElementById("cards").innerHTML = d.voters.map(v => card(v, d.urls[v.node])).join("");
-      banner(d.voters, d.majority);
+        `${voterCount} voters${followers ? ` + ${followers} follower(s)` : ""}, majority ${d.majority}` +
+        ` · member list v${d.member_list_version}` +
+        (d.pending_change ? ` (v${d.pending_change} being confirmed)` : "");
+      document.getElementById("cards").innerHTML =
+        d.voters.map(v => card(v, d.urls[v.node], d.roles)).join("");
+      banner(d.voters, d.majority, d.roles);
       renderEvents(d.voters);
       conn.className = "pill LEADER";
       conn.textContent = "live";
