@@ -1,0 +1,41 @@
+# Prometheus + Grafana for the election cluster, on the laptop.
+#
+# Pull the images BEFORE the lab (the lab router has no internet):
+#     docker compose pull
+# Then, from this folder:
+#     python3 make_targets.py --from http://localhost:5003 --docker --watch 5
+#     docker compose up -d          Prometheus http://localhost:9090
+#                                   Grafana    http://localhost:3000  (admin / admin)
+#     docker compose stop           stopping them never affects the election
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./targets:/etc/prometheus/targets:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets Prometheus reach the witness on the Mac
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      DASHBOARDS_DIR: /var/lib/grafana/dashboards
+      GF_AUTH_ANONYMOUS_ENABLED: "true"        # view without logging in during the demo
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/election-cluster.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped

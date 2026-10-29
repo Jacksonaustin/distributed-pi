@@ -1,0 +1,23 @@
+# Prometheus config for the election cluster.
+#
+# Targets are NOT listed here: they come from targets/election.json, which
+# make_targets.py writes from the cluster's member list. Prometheus re-reads
+# that file when it changes, so joins, leaves and address changes need no edit here.
+#
+# Prometheus only reads GET /metrics from each member. It never takes part in
+# elections - stopping it doesn't affect the cluster.
+
+global:
+  scrape_interval: 2s          # elections take seconds, so sample often
+  scrape_timeout: 1s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: election
+    metrics_path: /metrics
+    # Each member already labels its metrics with node="..."; keep that label
+    # instead of renaming it to exported_node.
+    honor_labels: true
+    file_sd_configs:
+      - files: ["targets/*.json"]   # relative to this file
+        refresh_interval: 5s

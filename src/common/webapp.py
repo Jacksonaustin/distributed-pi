@@ -20,6 +20,8 @@ from common.election import Node
 from common.event_log import EventLog
 from common.hardware import describe, make_indicator, parse_spec
 from common.membership import ROLES, Membership, write_if_newer
+from common.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from common.metrics import render as render_metrics
 from common.rpc import get_json, post_json, post_json_status
 
 TEMPLATE_DIR = os.path.join(SRC_DIR, "templates")
@@ -46,6 +48,11 @@ def create_app(node):
     @app.route("/members")
     def members():
         return node.member_list()
+
+    @app.route("/metrics")
+    def metrics():
+        """Prometheus scrapes this. Read-only: it never changes election state."""
+        return render_metrics(node.metrics_snapshot()), 200, {"Content-Type": METRICS_CONTENT_TYPE}
 
     def change_membership(kind, body, apply):
         """Run a join/leave here if this node is the leader, otherwise forward it

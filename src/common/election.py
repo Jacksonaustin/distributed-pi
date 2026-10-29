@@ -1,5 +1,6 @@
 import os
 import random
+from collections import Counter
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,6 +38,10 @@ class Node:
         self.event_log = event_log
         self.on_change = on_change
         self.lock = threading.Lock()
+        # running totals for /metrics (Prometheus); reset when the app restarts,
+        # which Prometheus handles for counters
+        self.event_counts = Counter()       # every event type written to the log
+        self.votes_refused = Counter()      # vote requests this node said no to, by reason
         # enough workers for one round of requests to every member at once
         self.pool = ThreadPoolExecutor(max_workers=16)
         self.state_file = os.path.join(STATE_DIR, name + ".json")
@@ -82,6 +87,7 @@ class Node:
         return "{}.{}".format(*self.members.config_id)
 
     def _log(self, event, details):
+        self.event_counts[event] += 1
         self.event_log.log(event, self.current_term, details)
 
     def _save(self):
@@ -165,6 +171,8 @@ class Node:
         """Reject a malformed message (or one from a member that may not send it)."""
         with self.lock:
             self._log("REJECTED_INVALID", f"{kind} {msg}: {reason}")
+            if reply_key == "vote_granted":
+                self.votes_refused["invalid"] += 1
             return {"term": self.current_term, reply_key: False}
 
     def _grant_lease(self):
@@ -245,16 +253,19 @@ class Node:
             if not self.active or self.role not in VOTING_ROLES:
                 self._log("REJECTED_NOT_VOTER", f"vote request from {candidate}: this node is "
                                                 f"a {self.role or 'non-member'} and doesn't vote")
+                self.votes_refused["not_voter"] += 1
                 return {"term": self.current_term, "vote_granted": False}
 
             if term < self.current_term:
                 self._log("REJECTED_OLD_TERM",
                           f"vote request from {candidate} term {term} < {self.current_term}")
+                self.votes_refused["old_term"] += 1
                 return {"term": self.current_term, "vote_granted": False}
 
             if not self.members.is_candidate(candidate):
                 self._log("REJECTED_INVALID", f"vote request from {candidate}: not a candidate "
                                               f"in member list v{self._config_label()}")
+                self.votes_refused["invalid"] += 1
                 return {"term": self.current_term, "vote_granted": False}
 
             # Safety: while a leader may still be acting, a request to start a new
@@ -266,6 +277,7 @@ class Node:
                 self._log("REJECTED_LEADER_ALIVE",
                           f"vote request from {candidate} term {term}: {who} may still be "
                           f"leading (lease {max(0.0, self.lease_until - now):.1f}s left)")
+                self.votes_refused["leader_alive"] += 1
                 return {"term": self.current_term, "vote_granted": False}
 
             if term > self.current_term:
@@ -276,6 +288,7 @@ class Node:
             if candidate_config < self.members.config_id:
                 self._log("VOTE_DENIED", "{}: its member list v{}.{} is older than v{}".format(
                     candidate, *candidate_config, self._config_label()))
+                self.votes_refused["stale_member_list"] += 1
                 return {"term": self.current_term, "vote_granted": False}
 
             if self.voted_for is None:
@@ -294,6 +307,7 @@ class Node:
 
             self._log("VOTE_DENIED", f"{candidate}: already voted for {self.voted_for} "
                                      f"in term {self.current_term}")
+            self.votes_refused["already_voted"] += 1
             return {"term": self.current_term, "vote_granted": False}
 
     # ------------------------------------------------------ membership changes
@@ -592,6 +606,23 @@ class Node:
     def status(self):
         with self.lock:
             return self._status_unlocked()
+
+    def metrics_snapshot(self):
+        """Everything /metrics needs, copied in one go so the lock is held only briefly."""
+        with self.lock:
+            now = time.monotonic()
+            if self.state == LEADER:
+                heartbeat_age = 0.0                 # the leader is the heartbeat source
+            elif self.last_heartbeat is not None:
+                heartbeat_age = now - self.last_heartbeat
+            else:
+                heartbeat_age = None                # never heard from a leader
+            return {
+                "status": self._status_unlocked(),
+                "heartbeat_age": heartbeat_age,
+                "events": dict(self.event_counts),
+                "votes_refused": dict(self.votes_refused),
+            }
 
     def adopt_member_list(self, snapshot, source):
         """Take the member list returned by the leader when our join was accepted."""

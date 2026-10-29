@@ -1,0 +1,11 @@
+# Grafana loads every dashboard JSON in DASHBOARDS_DIR at startup.
+# DASHBOARDS_DIR is set by docker-compose.yml, or by you when using Homebrew.
+apiVersion: 1
+
+providers:
+  - name: election
+    folder: Lab 6
+    type: file
+    allowUiUpdates: true
+    options:
+      path: ${DASHBOARDS_DIR}
