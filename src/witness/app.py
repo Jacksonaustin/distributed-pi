@@ -1,7 +1,7 @@
 """Witness voter - votes and acks heartbeats, never leads.
 
-Also runs any extra voter that has no hardware (another witness, or an extra
-candidate for testing). Its role comes from can_lead in the cluster file.
+The same shared app as the Pis (python -m node --name witness does the same);
+this entry point just defaults the name to "witness".
 
 Run from src/:  python -m witness.app [--name witness-2]
 """

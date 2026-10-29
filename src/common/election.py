@@ -8,6 +8,7 @@ from common.config import (
     CLUSTER_FILE, ELECTION_TIMEOUT_MAX, ELECTION_TIMEOUT_MIN, HEARTBEAT_INTERVAL,
     QUORUM_TIMEOUT, QUORUM_WARNING, REQUEST_TIMEOUT, STATE_DIR, TICK_INTERVAL,
 )
+from common.hardware import describe
 from common.membership import VOTING_ROLES, Membership, validate_member
 from common.rpc import get_json, post_json
 from common.storage import load_state, save_state
@@ -303,10 +304,10 @@ class Node:
         return 409, {"error": "not the leader", "leader": leader,
                      "leader_url": self.members.url(leader) if self.members.has(leader) else None}
 
-    def join(self, name, url, role):
-        """POST /join on the leader. Adds a member, or updates a member's address.
-        Returns (http_status, reply)."""
-        error = validate_member(name, url, role)
+    def join(self, name, url, role, hardware=None):
+        """POST /join on the leader. Adds a member, or updates a member's address
+        or hardware. Returns (http_status, reply)."""
+        error = validate_member(name, url, role, hardware)
         if error:
             return 400, {"error": error}
         url = url.rstrip("/")
@@ -319,7 +320,7 @@ class Node:
                 if current["role"] != role:
                     return 400, {"error": f"{name} is already a {current['role']}; "
                                           f"remove it before joining with another role"}
-                if current["url"] == url:
+                if current["url"] == url and current.get("hardware") == hardware:
                     return 200, {"ok": True, "detail": f"{name} is already a member",
                                  "config": self.members.snapshot()}
             taken = [n for n, m in self.members.members.items() if m["url"] == url and n != name]
@@ -343,14 +344,15 @@ class Node:
             is_new = not self.members.has(name)
             if role in VOTING_ROLES and is_new and self.pending_change:
                 return 409, {"error": "another voter change is still being confirmed; try again"}
-            self.members.set_member(self.current_term, name, url, role)
+            self.members.set_member(self.current_term, name, url, role, hardware)
             if is_new:
-                self._log("MEMBER_JOINED", f"{name} joined as {role} at {url}; member list "
+                self._log("MEMBER_JOINED", f"{name} joined as {role} at {url} "
+                                           f"({describe(hardware)}); member list "
                                            f"v{self._config_label()}, majority now "
                                            f"{self.members.majority()}")
             else:
-                self._log("MEMBER_UPDATED", f"{name} moved to {url}; member list "
-                                            f"v{self._config_label()}")
+                self._log("MEMBER_UPDATED", f"{name} now at {url} with {describe(hardware)}; "
+                                            f"member list v{self._config_label()}")
             if role in VOTING_ROLES and is_new:
                 self.pending_change = self.members.config_id
             return 200, {"ok": True, "config": self.members.snapshot(),
@@ -563,6 +565,7 @@ class Node:
         return {
             "node": self.name,
             "role": self.role,
+            "hardware": self.members.hardware(self.name),
             "active": self.active,
             "can_lead": self.can_lead,
             "state": self.state,

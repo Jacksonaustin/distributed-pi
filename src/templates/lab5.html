@@ -147,12 +147,14 @@
   }
 
   function hardware(v) {
-    if (v.node === "pi-a") {
+    // what this node's LED or buzzer should be doing, from its hardware entry
+    const type = v.hardware && v.hardware.type;
+    if (type === "led") {
       if (v.state === "LEADER") return v.has_quorum ? "LED solid" : "LED fast blink (lost quorum)";
       if (v.state === "CANDIDATE") return "LED slow blink";
       if (v.state === "FOLLOWER") return "LED off";
     }
-    if (v.node === "pi-b") {
+    if (type === "buzzer") {
       if (v.state === "LEADER") return v.has_quorum ? "Chirp every 5 s" : "Three beeps (lost quorum)";
       if (v.state === "CANDIDATE") return "One beep";
       if (v.state === "FOLLOWER") return "Silent";

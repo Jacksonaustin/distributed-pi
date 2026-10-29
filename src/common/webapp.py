@@ -18,6 +18,7 @@ from flask import Flask, render_template, request
 from common.config import CLUSTER_FILE, LOG_DIR, SRC_DIR
 from common.election import Node
 from common.event_log import EventLog
+from common.hardware import describe, make_indicator, parse_spec
 from common.membership import ROLES, Membership, write_if_newer
 from common.rpc import get_json, post_json, post_json_status
 
@@ -66,7 +67,8 @@ def create_app(node):
     def join():
         body = request.get_json(silent=True) or {}
         return change_membership(
-            "join", body, lambda: node.join(body.get("name"), body.get("url"), body.get("role")))
+            "join", body, lambda: node.join(body.get("name"), body.get("url"), body.get("role"),
+                                            body.get("hardware")))
 
     @app.route("/leave", methods=["POST"])
     def leave():
@@ -140,18 +142,32 @@ def _my_ip(join_url, members):
     return _ip_toward(join_url) or "127.0.0.1"   # everything is on this machine
 
 
-def _ask_to_join(node, event_log, join_url, my_url, role):
+def _same_address(listed_url, detected_url):
+    """True if both URLs point at this machine on the same port, even if one says
+    localhost and the other an IP - so a restart doesn't count as a move."""
+    a, b = urlparse(listed_url), urlparse(detected_url)
+    if a.port != b.port:
+        return False
+    try:
+        ip_a = socket.gethostbyname(a.hostname)
+    except OSError:
+        return False
+    local = {b.hostname, "127.0.0.1"}
+    return ip_a in local or ip_a.startswith("127.")
+
+
+def _ask_to_join(node, event_log, join_url, my_url, role, hardware):
     """Background thread: keep asking until the cluster's leader is sending us a
     member list with our name and address in it. An accepted join can still be
     lost if that leader is replaced before a majority has the new list - so a
     "yes" alone isn't enough, we wait to see it arrive and ask again if it doesn't."""
     time.sleep(1.0)                                  # let Flask start first
-    payload = {"name": node.name, "url": my_url, "role": role}
+    payload = {"name": node.name, "url": my_url, "role": role, "hardware": hardware}
 
     def joined():
         s = node.status()
         return s["active"] and any(m["name"] == node.name and m["url"] == my_url
-                                   for m in s["members"])
+                                   and m.get("hardware") == hardware for m in s["members"])
 
     while not joined():
         status_code, reply = post_json_status(join_url + "/join", payload, timeout=6.0)
@@ -173,26 +189,31 @@ def _ask_to_join(node, event_log, join_url, my_url, role):
         time.sleep(3.0)
 
 
-def run_node(default_name, on_change=None, setup=None):
-    """Start one member.
+def run_node(default_name=None, legacy_hardware=None):
+    """Start one member. Every Pi and the witness run this same code.
 
-    --name picks which cluster-file entry this process is (default_name otherwise),
-    so the same entry point can run witness, witness-2, pi-c, ...
-    --join asks a running cluster to add this node (or update its address).
-    setup(node) runs after the node exists but before its threads start.
+    The node's name defaults to this machine's hostname (pi-a, pi-b, ...); its
+    role, address and LED/buzzer pins come from its entry in the cluster file.
+    --join asks a running cluster to add this node, or to record a new address
+    or hardware for it. legacy_hardware only keeps the old Lab 5 entry points
+    working when the cluster file has no hardware entry for that Pi.
     """
     parser = argparse.ArgumentParser(description="Run one cluster member.")
-    parser.add_argument("--name", default=os.environ.get("NODE_NAME", default_name),
-                        help="member name (from the cluster file, or a new one with --join)")
+    parser.add_argument("--name", default=os.environ.get("NODE_NAME") or default_name
+                        or socket.gethostname().split(".")[0].lower(),
+                        help="member name (default: this machine's hostname)")
     parser.add_argument("--port", type=int, default=None,
                         help="override the port from the cluster file")
     parser.add_argument("--join", metavar="URL", default=None,
                         help="any running member, e.g. http://10.0.0.11:5001 - ask the cluster "
-                             "to add this node (or record its new address)")
+                             "to add this node (or record its new address / hardware)")
     parser.add_argument("--role", choices=ROLES, default=None,
                         help="role to join as (default: follower)")
     parser.add_argument("--url", default=None,
                         help="this node's address for the others (default: detected)")
+    parser.add_argument("--hardware", default=None, metavar="SPEC",
+                        help="this Pi's indicator: led:PIN, led:PIN:GROUND_PIN, buzzer:PIN, "
+                             "buzzer:PIN:active or none (default: from the cluster file)")
     args = parser.parse_args()
     join_url = args.join.rstrip("/") if args.join else None
 
@@ -207,7 +228,7 @@ def run_node(default_name, on_change=None, setup=None):
     is_member = members.has(args.name)
     if not is_member and not join_url:
         raise SystemExit(f"'{args.name}' is not in {CLUSTER_FILE}; "
-                         f"start it with --join <url of any member> to add it")
+                         f"start it with --join <url of any member> to add it, or pass --name")
 
     if is_member:
         port = args.port or members.port_of(args.name)
@@ -215,26 +236,37 @@ def run_node(default_name, on_change=None, setup=None):
     else:
         port = args.port or DEFAULT_JOIN_PORT
         role = args.role or "follower"
+    listed_hardware = members.hardware(args.name)
+    hardware = parse_spec(args.hardware) if args.hardware else (listed_hardware or legacy_hardware)
     my_url = args.url.rstrip("/") if args.url else (
         f"http://{_my_ip(join_url, members)}:{port}" if join_url else members.url(args.name))
-    # ask the leader if we're new, or if our address changed
-    needs_join = join_url and (not is_member or my_url != members.url(args.name))
+    if is_member and not args.url and _same_address(members.url(args.name), my_url):
+        my_url = members.url(args.name)        # unchanged - keep it exactly as listed
+    # ask the leader if we're new, or if our address or hardware changed
+    changed = not is_member or my_url != members.url(args.name) or hardware != listed_hardware
+    needs_join = bool(join_url) and changed
+    if changed and is_member and not join_url and args.hardware:
+        print(f"note: --hardware is used on this Pi, but the cluster file still lists "
+              f"{describe(listed_hardware)}; add --join <any member> to record it", flush=True)
 
     os.makedirs(LOG_DIR, exist_ok=True)
     event_log = EventLog(os.path.join(LOG_DIR, f"{args.name}_events.log"))
-    node = Node(args.name, event_log, on_change=on_change, role=None if is_member else role)
-    if setup:
-        setup(node)
+    indicator = make_indicator(hardware)
+    node = Node(args.name, event_log, on_change=indicator.on_change,
+                role=None if is_member else role)
+    indicator.start(node.status)
     node.start()
     if needs_join:
-        threading.Thread(target=_ask_to_join, args=(node, event_log, join_url, my_url, role),
+        threading.Thread(target=_ask_to_join,
+                         args=(node, event_log, join_url, my_url, role, hardware),
                          daemon=True).start()
 
     s = node.status()
-    joining = "" if is_member else f" | joining via {join_url} as {my_url}"
-    print(f"{args.name} ({role}) on port {port} | cluster {os.path.basename(CLUSTER_FILE)} "
-          f"v{s['member_list_version']} | majority {s['majority']} of {s['voters']}{joining} | "
-          f"dashboard http://localhost:{port}/", flush=True)
+    joining = f" | joining via {join_url} as {my_url}" if needs_join else ""
+    print(f"{args.name} ({role}, {describe(hardware)}) on port {port} | cluster "
+          f"{os.path.basename(CLUSTER_FILE)} v{s['member_list_version']} | majority "
+          f"{s['majority']} of {s['voters']}{joining} | dashboard http://localhost:{port}/",
+          flush=True)
     # one line per heartbeat request would bury the election events
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     create_app(node).run(host="0.0.0.0", port=port, use_reloader=False)

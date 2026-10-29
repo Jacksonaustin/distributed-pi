@@ -1,0 +1,12 @@
+{
+  "config_term": 0,
+  "config_version": 0,
+  "min_votes": 3,
+  "members": [
+    {"name": "pi-a", "url": "http://192.168.0.11:5001", "role": "candidate", "hardware": {"type": "led", "pin": 25, "ground_pin": 24}},
+    {"name": "pi-b", "url": "http://192.168.0.12:5002", "role": "candidate", "hardware": {"type": "buzzer", "pin": 6, "passive": true}},
+    {"name": "pi-c", "url": "http://192.168.0.13:5001", "role": "candidate", "hardware": {"type": "led", "pin": 17}},
+    {"name": "pi-d", "url": "http://192.168.0.14:5002", "role": "candidate", "hardware": {"type": "buzzer", "pin": 18, "passive": true}},
+    {"name": "witness", "url": "http://192.168.0.10:5003", "role": "witness"}
+  ]
+}

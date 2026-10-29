@@ -1,14 +1,34 @@
-# Running Lab 5
+# Running the election cluster
 
-Every voter runs the same Flask app (`common/webapp.py`). The only differences are its name, whether it can lead (from the cluster file), and pi-a's LED or pi-b's buzzer.
+**One shared app on every Pi.** All members (every Raspberry Pi and the witness) run the same command, `python -m node`. A member's **name** defaults to the machine's hostname. Its **role**, **address** and **LED or buzzer pins** all come from its entry in the cluster file, so nothing about a particular Pi is written in the Python code.
 
-| Voter | Command (from `src/`) | Hardware |
+| Member | Command (from `src/`) |
+|---|---|
+| any Pi | `python -m node` (if the hostname is the node name), or `python -m node --name pi-c` |
+| the witness | `python -m node --name witness` (or `python -m witness.app`) |
+
+The old Lab 5 commands, `python -m pi_a.lab5_app` and `python -m pi_b.lab5_app`, still work.
+
+### Hardware in the cluster file
+
+```json
+{"name": "pi-a", "url": "http://192.168.0.11:5001", "role": "candidate",
+ "hardware": {"type": "led", "pin": 25, "ground_pin": 24}}
+```
+
+| `hardware` | Meaning | Command-line form (`--hardware`) |
 |---|---|---|
-| pi-a | `python -m pi_a.lab5_app` | LED on GPIO26 |
-| pi-b | `python -m pi_b.lab5_app` | passive buzzer (TonalBuzzer) on GPIO6 |
-| witness, or any voter without hardware | `python -m witness.app [--name NAME]` | none |
+| `{"type": "led", "pin": 17}` | LED on GPIO17, other leg to GND | `led:17` |
+| `{"type": "led", "pin": 25, "ground_pin": 24}` | LED between GPIO25 and GPIO24 (GPIO24 held low as ground) | `led:25:24` |
+| `{"type": "buzzer", "pin": 6, "passive": true}` | passive buzzer (TonalBuzzer) on GPIO6 | `buzzer:6` |
+| `{"type": "buzzer", "pin": 18, "passive": false}` | active buzzer on GPIO18 | `buzzer:18:active` |
+| no `hardware` field | no LED or buzzer (the witness) | `none` |
 
-Each voter's port comes from its URL in the cluster file. Its dashboard is at `http://<host>:<port>/`.
+Pins are GPIO (BCM) numbers. The LED and buzzer patterns are the Lab 5 ones for every Pi. [`src/cluster.lab6.example.json`](../src/cluster.lab6.example.json) is a complete 4-Pi + witness example.
+
+To change a Pi's pins on a running cluster, restart it with `--hardware … --join <any member>`; every member records the change (`MEMBER_UPDATED`). Without `--join`, `--hardware` only applies on that Pi.
+
+Each member's port comes from its URL in the cluster file. Its dashboard is at `http://<host>:<port>/`.
 
 ## Cluster files
 
@@ -50,13 +70,13 @@ The majority (`voters // 2 + 1`) and the number of acks a leader needs (`majorit
 Start the new device with `--join` pointing at **any** running member. It fetches the current member list, starts its app, then asks to be added. Requests are forwarded to the leader.
 
 ```bash
-cd src && ../venv/bin/python -m witness.app --name pi-c --role candidate --port 5004 --join http://10.0.0.11:5001
+cd src && ../venv/bin/python -m node --name pi-c --role candidate --hardware led:17 --port 5004 --join http://10.0.0.11:5001
 ```
 
 - **`--role`:** `candidate`, `witness` or `follower` (default `follower`).
 - **`--port`:** the port this device listens on (default 5000).
 - **`--url`:** the address others should use, e.g. `http://10.0.0.13:5004`. If you leave it out, it's detected from the network interface that reaches the `--join` address.
-- **Entry point:** use `pi_a.lab5_app` or `pi_b.lab5_app` instead of `witness.app` if the device has that LED or buzzer.
+- **`--hardware`:** the device's LED or buzzer, e.g. `led:17` or `buzzer:18:active`; the leader stores it in everyone's member list. All devices use the same `python -m node` command.
 
 **Done when** its log shows `JOINED_CLUSTER` and every dashboard lists it. You can also add a device from any dashboard (**Members → Add member**), but it must already be running.
 
@@ -138,27 +158,23 @@ cd ~/Projects/distributed-pi/src && ../venv/bin/python -m witness.app
 
 ### 3. Start the Pis
 
-On pi-a:
+Every Pi runs the same command; only the name differs (leave out `--name` if the Pi's hostname is already its node name):
 
 ```bash
-cd ~/distributed-pi/src && ../venv/bin/python -m pi_a.lab5_app
+cd ~/distributed-pi/src && ../venv/bin/python -m node --name pi-a
 ```
 
-On pi-b:
-
-```bash
-cd ~/distributed-pi/src && ../venv/bin/python -m pi_b.lab5_app
-```
+The startup line shows what it read from the cluster file, e.g. `pi-a (candidate, LED on GPIO25, GPIO24 as ground) on port 5001`.
 
 The dashboards are at http://pi-a.local:5001/, http://pi-b.local:5002/ and http://localhost:5003/ (on the laptop).
 
 ### 4. Optional: start at boot
 
 ```bash
-sudo deploy/install_service.sh pi_a
+sudo deploy/install_service.sh pi-a
 ```
 
-Run that from the repo root on pi-a, and use `pi_b` on pi-b. Then `sudo systemctl stop lab5-pi-a` and `sudo systemctl start lab5-pi-a` are the "stop" and "restart" commands for the tests, and `journalctl -u lab5-pi-a -f` shows the output.
+Run that from the repo root on each Pi with its node name. Then `sudo systemctl stop election-pi-a` and `sudo systemctl start election-pi-a` are the "stop" and "restart" commands for the tests, and `journalctl -u election-pi-a -f` shows the output.
 
 ### If the Pis can't reach each other
 

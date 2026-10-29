@@ -21,6 +21,8 @@ import re
 import tempfile
 from urllib.parse import urlparse
 
+from common.hardware import describe, validate_hardware
+
 ROLES = ("candidate", "witness", "follower")
 VOTING_ROLES = ("candidate", "witness")
 # Course rule: a leader always needs at least this many votes, however few voters
@@ -30,7 +32,7 @@ MIN_VOTES = 3
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 
-def validate_member(name, url, role):
+def validate_member(name, url, role, hardware=None):
     """Return an error message for a bad join request, or None if it's fine."""
     if not isinstance(name, str) or not NAME_RE.match(name):
         return "name must be lowercase letters, digits and dashes (e.g. pi-c)"
@@ -40,7 +42,7 @@ def validate_member(name, url, role):
     if not parsed or parsed.scheme != "http" or not parsed.hostname or not parsed.port \
             or parsed.path not in ("", "/"):
         return "url must look like http://<ip or host>:<port>"
-    return None
+    return validate_hardware(hardware)
 
 
 def _role_of(entry):
@@ -54,6 +56,8 @@ def _parse(data):
     members = {}
     for entry in data.get("members", data.get("voters", [])):
         members[entry["name"]] = {"url": entry["url"].rstrip("/"), "role": _role_of(entry)}
+        if entry.get("hardware"):                 # this member's LED / buzzer pins
+            members[entry["name"]]["hardware"] = entry["hardware"]
     config_id = (int(data.get("config_term", 0)), int(data.get("config_version", 0)))
     members_min = int(data.get("min_votes", MIN_VOTES))
     return config_id, members, members_min
@@ -128,8 +132,7 @@ class Membership:
             "config_term": self.config_id[0],
             "config_version": self.config_id[1],
             "min_votes": self.min_votes,
-            "members": [{"name": n, "url": m["url"], "role": m["role"]}
-                        for n, m in self.members.items()],
+            "members": [{"name": n, **m} for n, m in self.members.items()],
         }
 
     # ------------------------------------------------------------- changes
@@ -137,6 +140,7 @@ class Membership:
     def replace(self, snapshot):
         """Adopt a newer list received from the leader. Returns a summary of what changed."""
         new_id, new_members, self.min_votes = _parse(snapshot)
+        self_before = self.members
         added = [n for n in new_members if n not in self.members]
         removed = [n for n in self.members if n not in new_members]
         moved = [n for n in new_members
@@ -145,13 +149,22 @@ class Membership:
         self.save()
         parts = ([f"+{n} ({new_members[n]['role']})" for n in added]
                  + [f"-{n}" for n in removed]
-                 + [f"{n} now {new_members[n]['url']}" for n in moved])
+                 + [f"{n} now {new_members[n]['url']}"
+                    + (f" with {describe(new_members[n].get('hardware'))}"
+                       if new_members[n].get("hardware") != self_before.get(n, {}).get("hardware")
+                       else "")
+                    for n in moved])
         return ", ".join(parts) or "no member changes"
 
-    def set_member(self, term, name, url, role):
-        """Leader only: add a member or change its address."""
+    def set_member(self, term, name, url, role, hardware=None):
+        """Leader only: add a member, or change its address or hardware."""
         self.members[name] = {"url": url.rstrip("/"), "role": role}
+        if hardware:
+            self.members[name]["hardware"] = hardware
         self._bump(term)
+
+    def hardware(self, name):
+        return self.members[name].get("hardware") if name in self.members else None
 
     def remove(self, term, name):
         """Leader only: remove a member."""

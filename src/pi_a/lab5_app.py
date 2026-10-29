@@ -1,14 +1,12 @@
-"""pi-a Lab 5 app: election node + LED indicators.
+"""Lab 5 entry point for pi-a - kept so the old command still works.
+New: python -m node --name pi-a (pins from the cluster file).
 
 Run from src/:  python -m pi_a.lab5_app
 """
-from common.hw import ensure_pin_factory
+from common.webapp import run_node
 
-ensure_pin_factory()          # must run before pi_a.gpio creates the LED
-
-from common.webapp import run_node   # noqa: E402
-from pi_a import indicators          # noqa: E402
+# Only used if the cluster file has no hardware entry for pi-a (Lab 5 wiring).
+LAB5_LED = {"type": "led", "pin": 25, "ground_pin": 24}
 
 if __name__ == "__main__":
-    run_node("pi-a", on_change=indicators.on_change,
-             setup=lambda node: indicators.show_follower())
+    run_node("pi-a", legacy_hardware=LAB5_LED)
